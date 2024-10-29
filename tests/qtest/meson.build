@@ -296,6 +296,7 @@ qos_test_ss.add(
   'nvme-test.c',
   'pca9552-test.c',
   'pci-test.c',
+  'pcie-test.c',
   'pcnet-test.c',
   'rs5c372-test.c',
   'sdhci-test.c',
