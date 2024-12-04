@@ -2038,6 +2038,7 @@ PCIE TDISP
 M: Michael Prantl <michael.prantl@hotmail.de>
 S: Maintained
 F: hw/misc/tdisp-testdev.c
+F: tests/qtest/tdisp-test.c
 
 ACPI/SMBIOS
 M: Michael S. Tsirkin <mst@redhat.com>
