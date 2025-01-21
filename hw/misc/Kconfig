@@ -34,6 +34,7 @@ config TDISP_TESTDEV
     bool
     default y if TEST_DEVICES
     depends on PCI
+    select SPDM
 
 config I2C_ECHO
     bool

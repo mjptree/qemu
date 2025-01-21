@@ -292,6 +292,7 @@ static libspdm_return_t spdm_responder_libspdm_get_response(
         assert(responder->get_response);
         responder->get_response(responder->dev, session_id, request_size,
             request, response_size, response);
+        return LIBSPDM_STATUS_UNSUPPORTED_CAP;
     } else {
         return LIBSPDM_STATUS_UNSUPPORTED_CAP;
     }
