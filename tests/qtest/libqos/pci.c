@@ -594,3 +594,39 @@ void add_qpci_address(QOSGraphEdgeOptions *opts, QPCIAddress *addr)
     opts->arg = addr;
     opts->size_arg = sizeof(QPCIAddress);
 }
+
+uint8_t qpcie_config_readb(QPCIDevice *dev, uint16_t offset)
+{
+    QPCIeBus *bus = (QPCIeBus *)dev->bus;
+    return bus->config_readb(bus, dev->devfn, offset);
+}
+
+uint16_t qpcie_config_readw(QPCIDevice *dev, uint16_t offset)
+{
+    QPCIeBus *bus = (QPCIeBus *)dev->bus;
+    return bus->config_readw(bus, dev->devfn, offset);
+}
+
+uint32_t qpcie_config_readl(QPCIDevice *dev, uint16_t offset)
+{
+    QPCIeBus *bus = (QPCIeBus *)dev->bus;
+    return bus->config_readl(bus, dev->devfn, offset);
+}
+
+void qpcie_config_writeb(QPCIDevice *dev, uint16_t offset, uint8_t value)
+{
+    QPCIeBus *bus = (QPCIeBus *)dev->bus;
+    bus->config_writeb(bus, dev->devfn, offset, value);
+}
+
+void qpcie_config_writew(QPCIDevice *dev, uint16_t offset, uint16_t value)
+{
+    QPCIeBus *bus = (QPCIeBus *)dev->bus;
+    bus->config_writew(bus, dev->devfn, offset, value);
+}
+
+void qpcie_config_writel(QPCIDevice *dev, uint16_t offset, uint32_t value)
+{
+    QPCIeBus *bus = (QPCIeBus *)dev->bus;
+    bus->config_writel(bus, dev->devfn, offset, value);
+}

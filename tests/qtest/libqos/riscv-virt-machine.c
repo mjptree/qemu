@@ -93,10 +93,10 @@ static QOSGraphObject *virt_get_device(void *obj, const char *device)
 static void riscv_config_qpci_bus(QGenericPCIBus *qpci)
 {
     qpci->gpex_pio_base = RISCV_GPEX_PIO_BASE;
-    qpci->bus.pio_limit = RISCV_BUS_PIO_LIMIT;
+    qpci->bus.legacy.pio_limit = RISCV_BUS_PIO_LIMIT;
 
-    qpci->bus.mmio_alloc_ptr = RISCV_BUS_MMIO_ALLOC_PTR;
-    qpci->bus.mmio_limit = RISCV_BUS_MMIO_LIMIT;
+    qpci->bus.legacy.mmio_alloc_ptr = RISCV_BUS_MMIO_ALLOC_PTR;
+    qpci->bus.legacy.mmio_limit = RISCV_BUS_MMIO_LIMIT;
 
     qpci->ecam_alloc_ptr = RISCV_ECAM_ALLOC_PTR;
 }

@@ -19,7 +19,7 @@
 
 typedef struct QGenericPCIBus {
     QOSGraphObject obj;
-    QPCIBus bus;
+    QPCIeBus bus;
     uint64_t gpex_pio_base;
     uint64_t ecam_alloc_ptr;
 } QGenericPCIBus;

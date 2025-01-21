@@ -78,10 +78,10 @@ static QOSGraphObject *virt_get_device(void *obj, const char *device)
 static void loongarch_config_qpci_bus(QGenericPCIBus *qpci)
 {
     qpci->gpex_pio_base = LOONGARCH_VIRT_PIO_BASE;
-    qpci->bus.pio_alloc_ptr = LOONGARCH_VIRT_PCIE_PIO_OFFSET;
-    qpci->bus.pio_limit = LOONGARCH_VIRT_PCIE_PIO_LIMIT;
-    qpci->bus.mmio_alloc_ptr = LOONGARCH_VIRT_PCIE_MMIO32_BASE;
-    qpci->bus.mmio_limit = LOONGARCH_VIRT_PCIE_MMIO32_LIMIT;
+    qpci->bus.legacy.pio_alloc_ptr = LOONGARCH_VIRT_PCIE_PIO_OFFSET;
+    qpci->bus.legacy.pio_limit = LOONGARCH_VIRT_PCIE_PIO_LIMIT;
+    qpci->bus.legacy.mmio_alloc_ptr = LOONGARCH_VIRT_PCIE_MMIO32_BASE;
+    qpci->bus.legacy.mmio_limit = LOONGARCH_VIRT_PCIE_MMIO32_LIMIT;
     qpci->ecam_alloc_ptr = LOONGARCH_VIRT_PCIE_ECAM_BASE;
 }
 

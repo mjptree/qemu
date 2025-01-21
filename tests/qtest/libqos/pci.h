@@ -22,6 +22,7 @@ typedef struct QPCIDevice QPCIDevice;
 typedef struct QPCIBus QPCIBus;
 typedef struct QPCIBar QPCIBar;
 typedef struct QPCIAddress QPCIAddress;
+typedef struct QPCIeBus QPCIeBus;
 
 struct QPCIBus {
     uint8_t (*pio_readb)(QPCIBus *bus, uint32_t addr);
@@ -54,6 +55,21 @@ struct QPCIBus {
     bool has_buggy_msi; /* TRUE for spapr, FALSE for pci */
     bool not_hotpluggable; /* TRUE if devices cannot be hotplugged */
 
+};
+
+struct QPCIeBus {
+    QPCIBus legacy;
+
+    uint8_t (*config_readb)(QPCIeBus *bus, int devfn, uint16_t offset);
+    uint16_t (*config_readw)(QPCIeBus *bus, int devfn, uint16_t offset);
+    uint32_t (*config_readl)(QPCIeBus *bus, int devfn, uint16_t offset);
+
+    void (*config_writeb)(QPCIeBus *bus, int devfn,
+                          uint16_t offset, uint8_t value);
+    void (*config_writew)(QPCIeBus *bus, int devfn,
+                          uint16_t offset, uint16_t value);
+    void (*config_writel)(QPCIeBus *bus, int devfn,
+                          uint16_t offset, uint32_t value);
 };
 
 struct QPCIBar {
@@ -127,4 +143,13 @@ QPCIBar qpci_legacy_iomap(QPCIDevice *dev, uint16_t addr);
 void qpci_unplug_acpi_device_test(QTestState *qs, const char *id, uint8_t slot);
 
 void add_qpci_address(QOSGraphEdgeOptions *opts, QPCIAddress *addr);
+
+uint8_t qpcie_config_readb(QPCIDevice *dev, uint16_t offset);
+uint16_t qpcie_config_readw(QPCIDevice *dev, uint16_t offset);
+uint32_t qpcie_config_readl(QPCIDevice *dev, uint16_t offset);
+
+void qpcie_config_writeb(QPCIDevice *dev, uint16_t offset, uint8_t value);
+void qpcie_config_writew(QPCIDevice *dev, uint16_t offset, uint16_t value);
+void qpcie_config_writel(QPCIDevice *dev, uint16_t offset, uint32_t value);
+
 #endif
