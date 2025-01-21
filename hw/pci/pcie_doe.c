@@ -198,11 +198,20 @@ static void pcie_doe_prepare_rsp(DOECap *doe_cap)
     }
 
     if (data_object->len < sizeof(DOEHeader)) {
+        /*
+         * Currently, handle_request is responsible for popping the write data
+         * mailbox. However, we can't proceed here, so we need to clean up the
+         * invalid data object.
+         */
         g_queue_pop_tail(write_data_mailbox);
         g_byte_array_unref(data_object);
         return;
     }
 
+    /*
+     * Setting DOE_GO in PCI_DOE_CAP_CONTROL means subsequent writes to the
+     * write data mailbox constitute a new data object.
+     */
     g_queue_push_head(write_data_mailbox, g_byte_array_new());
     header = (DOEHeader *)data_object->data;
     header1 = DATA_OBJ_BUILD_HEADER1(header->vendor_id, header->data_obj_type);
@@ -458,7 +467,8 @@ bool pcie_doe_receive_message(
         cap->write_data_bytes_in_flight -= data_object->len;
         g_byte_array_unref(data_object);
     } else {
-        /* discard silently */
+        /* discard (almost) silently */
+        *message_size = 0;
     }
 
     return true;

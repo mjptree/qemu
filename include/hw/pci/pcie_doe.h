@@ -96,11 +96,12 @@ struct DOECap {
         bool error;
     } status;
 
-    /* Mailboxes */
+    /* Host reads from head, device writes to tail */
     GQueue *read_data_mailbox;
     uint32_t read_data_bytes_in_flight;
     uint32_t read_data_bytes_capacity;
 
+    /* Host writes to head, device reads from tail */
     GQueue *write_data_mailbox;
     uint32_t write_data_bytes_in_flight;
     uint32_t write_data_bytes_capacity;
@@ -137,12 +138,14 @@ void pcie_doe_write_config(DOECap *doe_cap, uint32_t addr,
                            uint32_t val, int size);
 uint32_t pcie_doe_build_protocol(DOEProtocol *p);
 
+/* Host functions to write to and read from mailbox registers */
 uint32_t pcie_doe_read_doe_write_data_mailbox_register(DOECap *cap);
 void pcie_doe_write_doe_write_data_mailbox_register(DOECap *cap, uint32_t data);
 
 uint32_t pcie_doe_read_doe_read_data_mailbox_register(DOECap *cap);
 void pcie_doe_write_doe_read_data_mailbox_register(DOECap *cap, uint32_t data);
 
+/* Device functions to send and receive data objects */
 bool pcie_doe_send_message(
     DOECap *cap, size_t message_size, const void *message);
 bool pcie_doe_receive_message(
