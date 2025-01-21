@@ -33,59 +33,80 @@ typedef struct DoeDiscoveryRsp {
     uint8_t next_index;
 } QEMU_PACKED DoeDiscoveryRsp;
 
+static bool pcie_doe_data_object_ready(DOECap *cap)
+{
+    return !g_queue_is_empty(cap->read_data_mailbox);
+}
+
 static bool pcie_doe_discovery(DOECap *doe_cap)
 {
-    DoeDiscoveryReq *req = pcie_doe_get_write_mbox_ptr(doe_cap);
-    DoeDiscoveryRsp rsp;
-    uint8_t index = req->index;
+    uint8_t request_buffer[sizeof(DoeDiscoveryReq)];
+    uint8_t response_buffer[sizeof(DoeDiscoveryRsp)];
+    size_t request_size;
+    size_t response_size;
+
+    DoeDiscoveryReq *req;
+    DoeDiscoveryRsp *rsp;
+    uint8_t index, next_index;
     DOEProtocol *prot;
 
-    /* Discard request if length does not match DoeDiscoveryReq */
-    if (pcie_doe_get_obj_len(req) <
-        DIV_ROUND_UP(sizeof(DoeDiscoveryReq), DWORD_BYTE)) {
+    request_size = sizeof(request_buffer);
+    response_size = sizeof(response_buffer);
+    req = (DoeDiscoveryReq *)&request_buffer;
+
+    if (!pcie_doe_receive_message(doe_cap, &request_size, (void **)&req)) {
         return false;
     }
 
-    rsp.header = (DOEHeader) {
+    /* Discard request if length does not match DoeDiscoveryReq */
+    if (pcie_doe_data_object_length_in_bytes(&req->header) != request_size) {
+        return false;
+    }
+
+    index = req->index;
+    rsp = (DoeDiscoveryRsp *)&response_buffer;
+    rsp->header = (DOEHeader) {
         .vendor_id = PCI_VENDOR_ID_PCI_SIG,
         .data_obj_type = PCI_SIG_DOE_DISCOVERY,
-        .length = DIV_ROUND_UP(sizeof(DoeDiscoveryRsp), DWORD_BYTE),
+        .length = DIV_ROUND_UP(response_size, DWORD_BYTE),
     };
 
     /* Point to the requested protocol, index 0 must be Discovery */
     if (index == 0) {
-        rsp.vendor_id = PCI_VENDOR_ID_PCI_SIG;
-        rsp.data_obj_type = PCI_SIG_DOE_DISCOVERY;
+        rsp->vendor_id = PCI_VENDOR_ID_PCI_SIG;
+        rsp->data_obj_type = PCI_SIG_DOE_DISCOVERY;
+    } else if (index < doe_cap->protocol_num) {
+        prot = &doe_cap->protocols[index - 1];
+        rsp->vendor_id = prot->vendor_id;
+        rsp->data_obj_type = prot->data_obj_type;
     } else {
-        if (index < doe_cap->protocol_num) {
-            prot = &doe_cap->protocols[index - 1];
-            rsp.vendor_id = prot->vendor_id;
-            rsp.data_obj_type = prot->data_obj_type;
-        } else {
-            rsp.vendor_id = 0xFFFF;
-            rsp.data_obj_type = 0xFF;
-        }
+        rsp->vendor_id = 0xFFFF;
+        rsp->data_obj_type = 0xFF;
     }
 
-    if (index + 1 == doe_cap->protocol_num) {
-        rsp.next_index = 0;
+    next_index = index + 1;
+
+    if (next_index == doe_cap->protocol_num) {
+        rsp->next_index = 0;
     } else {
-        rsp.next_index = index + 1;
+        rsp->next_index = next_index;
     }
 
-    pcie_doe_set_rsp(doe_cap, &rsp);
+    return pcie_doe_send_message(doe_cap, response_size, (void *)rsp);
+}
 
-    return true;
+static void pcie_doe_data_object_free(void *data_object)
+{
+    g_byte_array_unref(data_object);
 }
 
 static void pcie_doe_reset_mbox(DOECap *st)
 {
-    st->read_mbox_idx = 0;
-    st->read_mbox_len = 0;
-    st->write_mbox_len = 0;
+    g_queue_clear_full(st->read_data_mailbox, pcie_doe_data_object_free);
+    st->read_data_bytes_in_flight = 0;
 
-    memset(st->read_mbox, 0, PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
-    memset(st->write_mbox, 0, PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
+    g_queue_clear_full(st->write_data_mailbox, pcie_doe_data_object_free);
+    st->write_data_bytes_in_flight = 0;
 }
 
 void pcie_doe_init(PCIDevice *dev, DOECap *doe_cap, uint16_t offset,
@@ -102,8 +123,11 @@ void pcie_doe_init(PCIDevice *dev, DOECap *doe_cap, uint16_t offset,
         doe_cap->cap.vec = vec;
     }
 
-    doe_cap->write_mbox = g_malloc0(PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
-    doe_cap->read_mbox = g_malloc0(PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
+    doe_cap->read_data_mailbox = g_queue_new();
+    doe_cap->read_data_bytes_capacity = PCI_DOE_DW_SIZE_MAX * DWORD_BYTE;
+
+    doe_cap->write_data_mailbox = g_queue_new();
+    doe_cap->write_data_bytes_capacity = PCI_DOE_DW_SIZE_MAX * DWORD_BYTE;
 
     pcie_doe_reset_mbox(doe_cap);
 
@@ -119,47 +143,14 @@ void pcie_doe_init(PCIDevice *dev, DOECap *doe_cap, uint16_t offset,
 
 void pcie_doe_fini(DOECap *doe_cap)
 {
-    g_free(doe_cap->read_mbox);
-    g_free(doe_cap->write_mbox);
+    g_queue_free_full(doe_cap->read_data_mailbox, pcie_doe_data_object_free);
+    g_queue_free_full(doe_cap->write_data_mailbox, pcie_doe_data_object_free);
     g_free(doe_cap);
 }
 
 uint32_t pcie_doe_build_protocol(DOEProtocol *p)
 {
     return DATA_OBJ_BUILD_HEADER1(p->vendor_id, p->data_obj_type);
-}
-
-void *pcie_doe_get_write_mbox_ptr(DOECap *doe_cap)
-{
-    return doe_cap->write_mbox;
-}
-
-/*
- * Copy the response to read mailbox buffer
- * This might be called in self-defined handle_request() if a DOE response is
- * required in the corresponding protocol
- */
-void pcie_doe_set_rsp(DOECap *doe_cap, void *rsp)
-{
-    uint32_t len = pcie_doe_get_obj_len(rsp);
-
-    memcpy(doe_cap->read_mbox + doe_cap->read_mbox_len, rsp, len * DWORD_BYTE);
-    doe_cap->read_mbox_len += len;
-}
-
-uint32_t pcie_doe_get_obj_len(void *obj)
-{
-    uint32_t len;
-
-    if (!obj) {
-        return 0;
-    }
-
-    /* Only lower 18 bits are valid */
-    len = DATA_OBJ_LEN_MASK(((DOEHeader *)obj)->length);
-
-    /* PCIe r6.0 Table 6.29: a value of 00000h indicates 2^18 DW */
-    return (len) ? len : PCI_DOE_DW_SIZE_MAX;
 }
 
 static void pcie_doe_irq_assert(DOECap *doe_cap)
@@ -180,15 +171,6 @@ static void pcie_doe_irq_assert(DOECap *doe_cap)
     }
 }
 
-static void pcie_doe_set_ready(DOECap *doe_cap, bool rdy)
-{
-    doe_cap->status.ready = rdy;
-
-    if (rdy) {
-        pcie_doe_irq_assert(doe_cap);
-    }
-}
-
 static void pcie_doe_set_error(DOECap *doe_cap, bool err)
 {
     doe_cap->status.error = err;
@@ -203,20 +185,34 @@ static void pcie_doe_set_error(DOECap *doe_cap, bool err)
  */
 static void pcie_doe_prepare_rsp(DOECap *doe_cap)
 {
+    GQueue *write_data_mailbox = doe_cap->write_data_mailbox;
+    GByteArray *data_object = g_queue_peek_tail(write_data_mailbox);
+    DOEHeader *header;
+    uint32_t header1;
     bool success = false;
     int p;
     bool (*handle_request)(DOECap *) = NULL;
 
-    if (doe_cap->status.error) {
+    if (doe_cap->status.error || !data_object) {
         return;
     }
 
-    if (doe_cap->write_mbox[0] ==
+    if (data_object->len < sizeof(DOEHeader)) {
+        g_queue_pop_tail(write_data_mailbox);
+        g_byte_array_unref(data_object);
+        return;
+    }
+
+    g_queue_push_head(write_data_mailbox, g_byte_array_new());
+    header = (DOEHeader *)data_object->data;
+    header1 = DATA_OBJ_BUILD_HEADER1(header->vendor_id, header->data_obj_type);
+
+    if (header1 ==
         DATA_OBJ_BUILD_HEADER1(PCI_VENDOR_ID_PCI_SIG, PCI_SIG_DOE_DISCOVERY)) {
         handle_request = pcie_doe_discovery;
     } else {
         for (p = 0; p < doe_cap->protocol_num - 1; p++) {
-            if (doe_cap->write_mbox[0] ==
+            if (header1 ==
                 pcie_doe_build_protocol(&doe_cap->protocols[p])) {
                 handle_request = doe_cap->protocols[p].handle_request;
                 break;
@@ -230,13 +226,13 @@ static void pcie_doe_prepare_rsp(DOECap *doe_cap)
      * indicated Length for a data object, then the
      * data object must be silently discarded.
      */
-    if (handle_request && (doe_cap->write_mbox_len ==
-        pcie_doe_get_obj_len(pcie_doe_get_write_mbox_ptr(doe_cap)))) {
+    if (handle_request && (data_object->len ==
+        pcie_doe_data_object_length_in_bytes(header))) {
         success = handle_request(doe_cap);
     }
 
     if (success) {
-        pcie_doe_set_ready(doe_cap, 1);
+        pcie_doe_irq_assert(doe_cap);
     } else {
         pcie_doe_reset_mbox(doe_cap);
     }
@@ -277,12 +273,12 @@ bool pcie_doe_read_config(DOECap *doe_cap, uint32_t addr, int size,
         *buf = FIELD_DP32(*buf, PCI_DOE_CAP_STATUS, DOE_ERROR,
                           doe_cap->status.error);
         *buf = FIELD_DP32(*buf, PCI_DOE_CAP_STATUS, DATA_OBJ_RDY,
-                          doe_cap->status.ready);
+                          pcie_doe_data_object_ready(doe_cap));
     /* Mailbox should be DW accessed */
+    } else if (addr == PCI_EXP_DOE_WR_DATA_MBOX && size == DWORD_BYTE) {
+        *buf = pcie_doe_read_doe_write_data_mailbox_register(doe_cap);
     } else if (addr == PCI_EXP_DOE_RD_DATA_MBOX && size == DWORD_BYTE) {
-        if (doe_cap->status.ready && !doe_cap->status.error) {
-            *buf = doe_cap->read_mbox[doe_cap->read_mbox_idx];
-        }
+        *buf = pcie_doe_read_doe_read_data_mailbox_register(doe_cap);
     }
 
     /* Process Alignment */
@@ -315,7 +311,6 @@ void pcie_doe_write_config(DOECap *doe_cap,
     switch (addr) {
     case PCI_EXP_DOE_CTRL:
         if (FIELD_EX32(val, PCI_DOE_CAP_CONTROL, DOE_ABORT)) {
-            pcie_doe_set_ready(doe_cap, 0);
             pcie_doe_set_error(doe_cap, 0);
             pcie_doe_reset_mbox(doe_cap);
             return;
@@ -342,26 +337,129 @@ void pcie_doe_write_config(DOECap *doe_cap,
         if (size != DWORD_BYTE) {
             return;
         }
-        doe_cap->read_mbox_idx++;
-        if (doe_cap->read_mbox_idx == doe_cap->read_mbox_len) {
-            pcie_doe_reset_mbox(doe_cap);
-            pcie_doe_set_ready(doe_cap, 0);
-        } else if (doe_cap->read_mbox_idx > doe_cap->read_mbox_len) {
-            /* Underflow */
-            pcie_doe_set_error(doe_cap, 1);
-        }
+
+        pcie_doe_write_doe_read_data_mailbox_register(doe_cap, val);
         break;
     case PCI_EXP_DOE_WR_DATA_MBOX:
         /* Mailbox should be DW accessed */
         if (size != DWORD_BYTE) {
             return;
         }
-        doe_cap->write_mbox[doe_cap->write_mbox_len] = val;
-        doe_cap->write_mbox_len++;
+
+        pcie_doe_write_doe_write_data_mailbox_register(doe_cap, val);
         break;
     case PCI_EXP_DOE_CAP:
         /* fallthrough */
     default:
         break;
     }
+}
+
+uint32_t pcie_doe_read_doe_write_data_mailbox_register(DOECap *cap)
+{
+    return 0;
+}
+
+void pcie_doe_write_doe_write_data_mailbox_register(DOECap *cap, uint32_t data)
+{
+    GQueue *write_data_mailbox = cap->write_data_mailbox;
+    uint32_t remaining =
+        cap->write_data_bytes_capacity - cap->write_data_bytes_in_flight;
+    GByteArray *data_object;
+
+    if (remaining < sizeof(data)) {
+        /* overflow */
+        pcie_doe_set_error(cap, true);
+        return;
+    }
+
+    data_object = g_queue_peek_head(write_data_mailbox);
+
+    if (!data_object) {
+        data_object = g_byte_array_new();
+        g_queue_push_head(write_data_mailbox, data_object);
+    }
+
+    g_byte_array_append(data_object, (guint8 *)&data, sizeof(data));
+    cap->write_data_bytes_in_flight += sizeof(data);
+}
+
+uint32_t pcie_doe_read_doe_read_data_mailbox_register(DOECap *cap)
+{
+    GQueue *read_data_mailbox = cap->read_data_mailbox;
+    GByteArray *data_object = g_queue_peek_head(read_data_mailbox);
+    uint32_t data = 0;
+
+    if (data_object) {
+        if (data_object->len >= sizeof(data)) {
+            memcpy(&data, data_object->data, sizeof(data));
+        } else {
+            /* data object padding error */
+            pcie_doe_set_error(cap, true);
+        }
+    }
+
+    return data;
+}
+
+void pcie_doe_write_doe_read_data_mailbox_register(DOECap *cap, uint32_t data)
+{
+    GQueue *read_data_mailbox = cap->read_data_mailbox;
+    GByteArray *data_object = g_queue_peek_head(read_data_mailbox);
+
+    if (data_object) {
+        if (data_object->len > sizeof(data)) {
+            cap->read_data_bytes_in_flight -= sizeof(data);
+            g_byte_array_remove_range(data_object, 0, sizeof(data));
+        } else {
+            cap->read_data_bytes_in_flight -= data_object->len;
+            g_queue_pop_head(read_data_mailbox);
+            g_byte_array_unref(data_object);
+        }
+    } else {
+        /* underflow */
+        pcie_doe_set_error(cap, true);
+    }
+}
+
+bool pcie_doe_send_message(
+    DOECap *cap, size_t message_size, const void *message)
+{
+    GQueue *read_data_mailbox = cap->read_data_mailbox;
+    size_t remaining =
+        cap->read_data_bytes_capacity - cap->read_data_bytes_in_flight;
+    GByteArray *data_object;
+
+    if (remaining < message_size) {
+        pcie_doe_set_error(cap, true);
+        return false;
+    }
+
+    data_object =
+        g_byte_array_append(g_byte_array_new(), message, message_size);
+    cap->read_data_bytes_in_flight += data_object->len;
+    g_queue_push_tail(read_data_mailbox, data_object);
+    return true;
+}
+
+bool pcie_doe_receive_message(
+    DOECap *cap, size_t *message_size, void **message)
+{
+    GQueue *write_data_mailbox = cap->write_data_mailbox;
+    GByteArray *data_object = g_queue_pop_tail(write_data_mailbox);
+    size_t buffer_size = *message_size;
+
+    if (data_object) {
+        if (likely(data_object->len <= buffer_size)) {
+            *message_size = data_object->len;
+        }
+
+        memcpy(*message, data_object->data, *message_size);
+        cap->write_data_bytes_in_flight -= data_object->len;
+        g_byte_array_unref(data_object);
+    } else {
+        /* discard silently */
+    }
+
+    return true;
 }

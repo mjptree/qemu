@@ -44,8 +44,8 @@ static bool read_data32(const int socket, uint32_t *data)
 }
 
 static bool read_multiple_bytes(const int socket, uint8_t *buffer,
-                                uint32_t *bytes_received,
-                                uint32_t max_buffer_length)
+                                size_t *bytes_received,
+                                size_t max_buffer_length)
 {
     uint32_t length;
     bool result;
@@ -74,11 +74,11 @@ static bool receive_platform_data(const int socket,
                                   uint32_t transport_type,
                                   uint32_t *command,
                                   uint8_t *receive_buffer,
-                                  uint32_t *bytes_to_receive)
+                                  size_t *bytes_to_receive)
 {
     bool result;
     uint32_t response;
-    uint32_t bytes_received;
+    size_t bytes_received;
 
     result = read_data32(socket, &response);
     if (!result) {
@@ -184,9 +184,9 @@ int spdm_socket_connect(uint16_t port, Error **errp)
     return client_socket;
 }
 
-uint32_t spdm_socket_rsp(const int socket, uint32_t transport_type,
-                         void *req, uint32_t req_len,
-                         void *rsp, uint32_t rsp_len)
+size_t spdm_socket_rsp(const int socket, uint32_t transport_type,
+                         void *req, size_t req_len,
+                         void *rsp, size_t rsp_len)
 {
     uint32_t command;
     bool result;

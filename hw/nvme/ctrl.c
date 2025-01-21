@@ -8618,17 +8618,38 @@ static int nvme_add_pm_capability(PCIDevice *pci_dev, uint8_t offset)
 
 static bool pcie_doe_spdm_rsp(DOECap *doe_cap)
 {
-    void *req = pcie_doe_get_write_mbox_ptr(doe_cap);
-    uint32_t req_len = pcie_doe_get_obj_len(req) * 4;
-    void *rsp = doe_cap->read_mbox;
-    uint32_t rsp_len = SPDM_SOCKET_MAX_MESSAGE_BUFFER_SIZE;
+    size_t req_len = SPDM_SOCKET_MAX_MESSAGE_BUFFER_SIZE;
+    size_t rsp_len = SPDM_SOCKET_MAX_MESSAGE_BUFFER_SIZE;
+    size_t recvd;
+    void *req, *rsp;
+    bool result;
 
-    uint32_t recvd = spdm_socket_rsp(doe_cap->spdm_socket,
-                             SPDM_SOCKET_TRANSPORT_TYPE_PCI_DOE,
-                             req, req_len, rsp, rsp_len);
-    doe_cap->read_mbox_len += DIV_ROUND_UP(recvd, 4);
+    req = g_malloc0(req_len);
 
-    return recvd != 0;
+    if (!pcie_doe_receive_message(doe_cap, &req_len, &req)) {
+        g_free(req);
+        return false;
+    }
+
+    if (pcie_doe_data_object_length_in_bytes(req) != req_len) {
+        g_free(req);
+        return false;
+    }
+
+    rsp = g_malloc0(rsp_len);
+    recvd = spdm_socket_rsp(doe_cap->spdm_socket,
+                            SPDM_SOCKET_TRANSPORT_TYPE_PCI_DOE,
+                            req, req_len, rsp, rsp_len);
+    g_free(req);
+
+    if (!recvd || pcie_doe_data_object_length_in_bytes(rsp) != recvd) {
+        g_free(rsp);
+        return false;
+    }
+
+    result = pcie_doe_send_message(doe_cap, recvd, rsp);
+    g_free(rsp);
+    return result;
 }
 
 static DOEProtocol doe_spdm_prot[] = {

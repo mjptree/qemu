@@ -46,9 +46,9 @@ int spdm_socket_connect(uint16_t port, Error **errp);
  * Send platform data to a SPDM server on socket and then receive
  * a response.
  */
-uint32_t spdm_socket_rsp(const int socket, uint32_t transport_type,
-                         void *req, uint32_t req_len,
-                         void *rsp, uint32_t rsp_len);
+size_t spdm_socket_rsp(const int socket, uint32_t transport_type,
+                         void *req, size_t req_len,
+                         void *rsp, size_t rsp_len);
 
 /**
  * spdm_socket_close: send a shutdown command to the server

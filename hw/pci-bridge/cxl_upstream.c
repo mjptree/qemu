@@ -14,6 +14,7 @@
 #include "hw/qdev-properties-system.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/pcie.h"
+#include "hw/pci/pcie_doe.h"
 #include "hw/pci/pcie_port.h"
 #include "hw/pci-bridge/cxl_upstream_port.h"
 /*
@@ -143,15 +144,32 @@ static bool cxl_doe_cdat_rsp(DOECap *doe_cap)
     uint16_t ent;
     void *base;
     uint32_t len;
-    CDATReq *req = pcie_doe_get_write_mbox_ptr(doe_cap);
-    CDATRsp rsp;
+
+    uint8_t request_buffer[sizeof(CDATReq)];
+    size_t request_size;
+    uint8_t *response_buffer;
+    size_t response_size;
+
+    CDATReq *req;
+    CDATRsp *rsp;
+
+    bool result;
 
     cxl_doe_cdat_update(&CXL_USP(doe_cap->pdev)->cxl_cstate, &error_fatal);
-    assert(cdat->entry_len);
 
-    /* Discard if request length mismatched */
-    if (pcie_doe_get_obj_len(req) <
-        DIV_ROUND_UP(sizeof(CDATReq), sizeof(uint32_t))) {
+    assert(cdat->entry_len);
+    request_size = sizeof(request_buffer);
+    req = (CDATReq *)&request_buffer;
+
+    if (!pcie_doe_receive_message(doe_cap, &request_size, (void **)&req)) {
+        return false;
+    }
+
+    /*
+     * Discard if request length mismatched. Length as indicated by DOE header
+     * is per defition DWORD aligned.
+     */
+    if (pcie_doe_data_object_length_in_bytes(&req->header) != request_size) {
         return false;
     }
 
@@ -159,26 +177,27 @@ static bool cxl_doe_cdat_rsp(DOECap *doe_cap)
     base = cdat->entry[ent].base;
     len = cdat->entry[ent].length;
 
-    rsp = (CDATRsp) {
+    response_size = sizeof(CDATRsp) + len;
+    response_buffer = g_malloc0(response_size);
+    rsp = (CDATRsp *)response_buffer;
+
+    *rsp = (CDATRsp) {
         .header = {
             .vendor_id = CXL_VENDOR_ID,
             .data_obj_type = CXL_DOE_TABLE_ACCESS,
             .reserved = 0x0,
-            .length = DIV_ROUND_UP((sizeof(rsp) + len), sizeof(uint32_t)),
+            .length = DIV_ROUND_UP(response_size, sizeof(uint32_t)),
         },
         .rsp_code = CXL_DOE_TAB_RSP,
         .table_type = CXL_DOE_TAB_TYPE_CDAT,
         .entry_handle = (ent < cdat->entry_len - 1) ?
                         ent + 1 : CXL_DOE_TAB_ENT_MAX,
     };
+    memcpy(response_buffer + sizeof(CDATRsp), base, len);
 
-    memcpy(doe_cap->read_mbox, &rsp, sizeof(rsp));
-        memcpy(doe_cap->read_mbox + DIV_ROUND_UP(sizeof(rsp), sizeof(uint32_t)),
-           base, len);
-
-    doe_cap->read_mbox_len += rsp.header.length;
-
-    return true;
+    result = pcie_doe_send_message(doe_cap, response_size, response_buffer);
+    g_free(response_buffer);
+    return result;
 }
 
 static DOEProtocol doe_cdat_prot[] = {

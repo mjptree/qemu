@@ -94,16 +94,16 @@ struct DOECap {
         bool busy;
         bool intr;
         bool error;
-        bool ready;
     } status;
 
-    uint32_t *write_mbox;
-    uint32_t *read_mbox;
+    /* Mailboxes */
+    GQueue *read_data_mailbox;
+    uint32_t read_data_bytes_in_flight;
+    uint32_t read_data_bytes_capacity;
 
-    /* Mailbox position indicator */
-    uint32_t read_mbox_idx;
-    uint32_t read_mbox_len;
-    uint32_t write_mbox_len;
+    GQueue *write_data_mailbox;
+    uint32_t write_data_bytes_in_flight;
+    uint32_t write_data_bytes_capacity;
 
     /* Protocols and its callback response */
     DOEProtocol *protocols;
@@ -113,6 +113,21 @@ struct DOECap {
     int spdm_socket;
 };
 
+static inline uint32_t pcie_doe_data_object_length_in_dword(DOEHeader *header)
+{
+    /* Only lower 18 bits are valid */
+    uint32_t length = DATA_OBJ_LEN_MASK(header->length);
+
+    /* PCIe r6.0 Table 6.29: a value of 00000h indicates 2^18 DW */
+    return length ?: PCI_DOE_DW_SIZE_MAX;
+}
+
+static inline uint32_t pcie_doe_data_object_length_in_bytes(DOEHeader *header)
+{
+    uint32_t dwords = pcie_doe_data_object_length_in_dword(header);
+    return dwords * sizeof(uint32_t);
+}
+
 void pcie_doe_init(PCIDevice *pdev, DOECap *doe_cap, uint16_t offset,
                    DOEProtocol *protocols, bool intr, uint16_t vec);
 void pcie_doe_fini(DOECap *doe_cap);
@@ -121,7 +136,16 @@ bool pcie_doe_read_config(DOECap *doe_cap, uint32_t addr, int size,
 void pcie_doe_write_config(DOECap *doe_cap, uint32_t addr,
                            uint32_t val, int size);
 uint32_t pcie_doe_build_protocol(DOEProtocol *p);
-void *pcie_doe_get_write_mbox_ptr(DOECap *doe_cap);
-void pcie_doe_set_rsp(DOECap *doe_cap, void *rsp);
-uint32_t pcie_doe_get_obj_len(void *obj);
+
+uint32_t pcie_doe_read_doe_write_data_mailbox_register(DOECap *cap);
+void pcie_doe_write_doe_write_data_mailbox_register(DOECap *cap, uint32_t data);
+
+uint32_t pcie_doe_read_doe_read_data_mailbox_register(DOECap *cap);
+void pcie_doe_write_doe_read_data_mailbox_register(DOECap *cap, uint32_t data);
+
+bool pcie_doe_send_message(
+    DOECap *cap, size_t message_size, const void *message);
+bool pcie_doe_receive_message(
+    DOECap *cap, size_t *message_size, void **message);
+
 #endif /* PCIE_DOE_H */
