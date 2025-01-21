@@ -8,6 +8,9 @@ config LINUX
 config LIBCBOR
     bool
 
+config LIBSPDM
+    bool
+
 config GNUTLS
     bool
 

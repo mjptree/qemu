@@ -137,6 +137,7 @@ meson_options_help() {
   printf "%s\n" '  kvm             KVM acceleration support'
   printf "%s\n" '  l2tpv3          l2tpv3 network backend support'
   printf "%s\n" '  libcbor         libcbor support'
+  printf "%s\n" '  libspdm         libspdm support'
   printf "%s\n" '  libdaxctl       libdaxctl support'
   printf "%s\n" '  libdw           debuginfo support'
   printf "%s\n" '  libiscsi        libiscsi userspace initiator'
@@ -365,6 +366,8 @@ _meson_option_parse() {
     --disable-l2tpv3) printf "%s" -Dl2tpv3=disabled ;;
     --enable-libcbor) printf "%s" -Dlibcbor=enabled ;;
     --disable-libcbor) printf "%s" -Dlibcbor=disabled ;;
+    --enable-libspdm) printf "%s" -Dlibspdm=enabled ;;
+    --disable-libspdm) printf "%s" -Dlibspdm=disabled ;;
     --enable-libdaxctl) printf "%s" -Dlibdaxctl=enabled ;;
     --disable-libdaxctl) printf "%s" -Dlibdaxctl=disabled ;;
     --libdir=*) quote_sh "-Dlibdir=$2" ;;

@@ -172,6 +172,8 @@ option('curses', type : 'feature', value : 'auto',
        description: 'curses UI')
 option('libcbor', type : 'feature', value : 'auto',
        description: 'libcbor support')
+option('libspdm', type : 'feature', value : 'auto',
+       description: 'libspdm support')
 option('gnutls', type : 'feature', value : 'auto',
        description: 'GNUTLS cryptography support')
 option('nettle', type : 'feature', value : 'auto',

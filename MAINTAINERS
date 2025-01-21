@@ -3488,9 +3488,12 @@ T: git https://github.com/stefanberger/qemu-tpm.git tpm-next
 
 SPDM
 M: Alistair Francis <alistair.francis@wdc.com>
+M: Michael Prantl <michael.prantl@hotmail.de>
 S: Maintained
 F: backends/spdm-socket.c
 F: include/system/spdm-socket.h
+F: include/hw/spdm/
+F: hw/spdm/
 
 Checkpatch
 S: Odd Fixes

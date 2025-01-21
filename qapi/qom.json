@@ -1128,6 +1128,8 @@
     'secret',
     { 'name': 'secret_keyring',
       'if': 'CONFIG_SECRET_KEYRING' },
+    { 'name': 'spdm-responder-libspdm',
+      'if': 'CONFIG_LIBSPDM' },
     'sev-guest',
     'sev-snp-guest',
     'thread-context',
