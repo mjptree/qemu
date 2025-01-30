@@ -8,26 +8,8 @@
 #define TYPE_SPDM_RESPONDER_LIBSDPM "spdm-responder-libspdm"
 OBJECT_DECLARE_SIMPLE_TYPE(SPDMResponderLibspdm, SPDM_RESPONDER_LIBSDPM)
 
-struct SPDMResponderLibspdm {
-    /*< private >*/
-    SPDMResponder parent_obj;
-    /*< public >*/
-
-    DeviceState *dev;
-
-    void *spdm_context;
-    void *scratch_buffer;
-
-    SPDMResponderSendMessageFunc *send_message;
-    SPDMResponderReceiveMessageFunc *receive_message;
-    SPDMResponderGetResponseFunc *get_response;
-
-    uint32_t max_spdm_msg_size;
-    uint32_t data_transfer_size;
-    uint32_t buffer_size;
-    void *sender_buffer, *receiver_buffer;
-
-    uint32_t capabilities;
-};
+extern bool libspdm_asym_get_private_key_from_pem(
+    uint32_t base_asym_algo, const uint8_t *pem_data, size_t pem_size,
+    const char *password, void **context);
 
 #endif /* HW_SPDM_SPDM_RESPONDER_LIBSPDM_H */

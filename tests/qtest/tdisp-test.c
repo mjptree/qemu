@@ -42,6 +42,7 @@ typedef struct QTDISPTestDev {
     void *scratch_buffer;
     void *sender_buffer;
     void *receiver_buffer;
+    gchar *root_certs[LIBSPDM_MAX_ROOT_CERT_SUPPORT];
 } QTDISPTestDev;
 
 bool libspdm_requester_data_sign(
@@ -311,10 +312,62 @@ static void tdisp_testdev_pci_init(
     qpci_device_enable(dev);
 }
 
+static void tdisp_load_peer_root_certs(QTDISPTestDev *dev)
+{
+    const gchar cert_dirname[] = "tests/data/tdisp";
+    const gchar *root_cert_filenames[] = {
+        "rsa3072/ca.cert.der", "ecp256/ca.cert.der", "ecp384/ca.cert.der"
+    };
+    gchar *root_cert_filename;
+    libspdm_data_parameter_t parameter = {
+        .location = LIBSPDM_DATA_LOCATION_LOCAL,
+    };
+    size_t root_cert_size, index = 0;
+
+    g_assert_cmpuint(
+        ARRAY_SIZE(root_cert_filenames), <=, LIBSPDM_MAX_ROOT_CERT_SUPPORT);
+
+    for (; index < ARRAY_SIZE(root_cert_filenames); ++index) {
+        root_cert_filename = g_build_filename(
+            cert_dirname, root_cert_filenames[index], NULL);
+        g_assert_true(
+            g_file_get_contents(root_cert_filename, &dev->root_certs[index],
+                &root_cert_size, NULL));
+        assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+            LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT, &parameter,
+            dev->root_certs[index], root_cert_size));
+        g_free(root_cert_filename);
+    }
+
+    for (; index < LIBSPDM_MAX_ROOT_CERT_SUPPORT; ++index) {
+        dev->root_certs[index] = NULL;
+    }
+}
+
 static void tdisp_testdev_spdm_init(QTDISPTestDev *dev)
 {
     libspdm_data_parameter_t parameter;
     size_t scratch_buffer_size;
+    uint32_t capabilities = SPDM_GET_CAPABILITIES_REQUEST_FLAGS_ENCRYPT_CAP |
+        SPDM_GET_CAPABILITIES_REQUEST_FLAGS_MAC_CAP |
+        SPDM_GET_CAPABILITIES_REQUEST_FLAGS_KEY_EX_CAP |
+        SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CHUNK_CAP;
+    uint32_t base_asym_algo =
+        SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_RSASSA_3072 |
+        SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256 |
+        SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P384;
+    uint32_t base_hash_algo = SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256 |
+        SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_384;
+    uint16_t dhe_named_group = SPDM_ALGORITHMS_DHE_NAMED_GROUP_FFDHE_2048 |
+        SPDM_ALGORITHMS_DHE_NAMED_GROUP_FFDHE_3072 |
+        SPDM_ALGORITHMS_DHE_NAMED_GROUP_FFDHE_4096 |
+        SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_256_R1 |
+        SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_384_R1 |
+        SPDM_ALGORITHMS_DHE_NAMED_GROUP_SECP_521_R1 |
+        SPDM_ALGORITHMS_DHE_NAMED_GROUP_SM2_P256;
+    uint16_t aead_cipher_suite = SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_AES_256_GCM;
+    uint16_t key_schedule = SPDM_ALGORITHMS_KEY_SCHEDULE_HMAC_HASH;
+    uint8_t other_params = SPDM_ALGORITHMS_OPAQUE_DATA_FORMAT_1;
 
     dev->spdm_context = g_malloc(libspdm_get_context_size());
     assert_libspdm_is_success(libspdm_init_context(dev->spdm_context));
@@ -345,7 +398,30 @@ static void tdisp_testdev_spdm_init(QTDISPTestDev *dev)
 
     parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
     assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_CAPABILITY_FLAGS, &parameter, &capabilities,
+        sizeof(capabilities)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter, &base_asym_algo,
+        sizeof(base_asym_algo)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_BASE_HASH_ALGO, &parameter, &base_hash_algo,
+        sizeof(base_hash_algo)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_DHE_NAME_GROUP, &parameter, &dhe_named_group,
+        sizeof(dhe_named_group)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_AEAD_CIPHER_SUITE, &parameter, &aead_cipher_suite,
+        sizeof(aead_cipher_suite)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_KEY_SCHEDULE, &parameter, &key_schedule,
+        sizeof(key_schedule)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
         LIBSPDM_DATA_APP_CONTEXT_DATA, &parameter, &dev, sizeof(dev)));
+    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
+        LIBSPDM_DATA_OTHER_PARAMS_SUPPORT, &parameter, &other_params,
+        sizeof(other_params)));
+
+    tdisp_load_peer_root_certs(dev);
     g_assert_true(libspdm_check_context(dev->spdm_context));
 }
 
@@ -357,6 +433,10 @@ static void tdisp_testdev_destructor(QOSGraphObject *obj)
     g_free(dev->scratch_buffer);
     g_free(dev->sender_buffer);
     g_free(dev->receiver_buffer);
+
+    for (size_t index = 0; index < LIBSPDM_MAX_ROOT_CERT_SUPPORT; ++index) {
+        g_free(dev->root_certs[index]);
+    }
 }
 
 static void *tdisp_testdev_create(
@@ -398,7 +478,7 @@ static void tdisp_testdev_get_vca(
 
     assert_libspdm_is_success(
         libspdm_get_data(tdisp->spdm_context, LIBSPDM_DATA_CONNECTION_STATE,
-                         &parameter, &connection_state, &size));
+            &parameter, &connection_state, &size));
     g_assert_cmpuint(
         connection_state, ==, LIBSPDM_CONNECTION_STATE_NEGOTIATED);
 }
@@ -407,14 +487,35 @@ static void tdisp_testdev_authenticate(
     void *obj, void *data, QGuestAllocator *alloc)
 {
     QTDISPTestDev *tdisp = obj;
-    uint8_t slot_mask;
-    uint8_t total_digest_buffer[LIBSPDM_MAX_HASH_SIZE * SPDM_MAX_SLOT_COUNT];
+    uint8_t slot_mask, slot_id = 0;
+    uint8_t cert_chain[SPDM_MAX_SLOT_COUNT][LIBSPDM_MAX_CERT_CHAIN_SIZE];
+    size_t cert_chain_size;
 
     qpci_device_enable(&tdisp->dev);
-    assert_libspdm_is_success(libspdm_init_connection(
-        tdisp->spdm_context, false));
-    assert_libspdm_is_success(libspdm_get_digest(
-        tdisp->spdm_context, NULL, &slot_mask, total_digest_buffer));
+    assert_libspdm_is_success(
+        libspdm_init_connection(tdisp->spdm_context, false));
+    assert_libspdm_is_success(
+        libspdm_get_digest(tdisp->spdm_context, NULL, &slot_mask, NULL));
+    g_assert_cmpuint(slot_mask, !=, 0);
+
+    for (; slot_id < SPDM_MAX_SLOT_COUNT; ++slot_id) {
+        if (slot_mask & (1 << slot_id)) {
+            cert_chain_size = sizeof(cert_chain[slot_id]);
+            assert_libspdm_is_success(
+                libspdm_get_certificate(tdisp->spdm_context, NULL, slot_id,
+                    &cert_chain_size, cert_chain[slot_id]));
+            break;
+        }
+    }
+
+    /*
+     * Use whichever cert chain is in the highest slot id for
+     * authentication.
+     */
+    assert_libspdm_is_success(
+        libspdm_challenge(tdisp->spdm_context, NULL, slot_id,
+            SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH, NULL,
+            &slot_mask));
 }
 
 static void tdisp_testdev_register_driver(void)
@@ -422,7 +523,13 @@ static void tdisp_testdev_register_driver(void)
     QOSGraphEdgeOptions opts = {
         .before_cmd_line = "-device pcie-root-port,id=pcie.1",
         .extra_device_opts = "bus=pcie.1,addr=00.0,spdm-responder=spdm.0",
-        .after_cmd_line = "-object spdm-responder-libspdm,id=spdm.0",
+        .after_cmd_line = "-object spdm-responder-libspdm,id=spdm.0,"
+            "certs=tests/data/tdisp/rsa3072/device.certchain.der,"
+            "keys=tests/data/tdisp/rsa3072/device.key,"
+            "certs=tests/data/tdisp/ecp256/device.certchain.der,"
+            "keys=tests/data/tdisp/ecp256/device.key,"
+            "certs=tests/data/tdisp/ecp384/device.certchain.der,"
+            "keys=tests/data/tdisp/ecp384/device.key",
     };
     QPCIAddress addr = {
         .devfn = QPCI_DEVFN(0 , 0),
