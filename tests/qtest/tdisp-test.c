@@ -518,6 +518,40 @@ static void tdisp_testdev_authenticate(
             &slot_mask));
 }
 
+static void tdisp_testdev_secure_session(
+    void *obj, void *data, QGuestAllocator *alloc)
+{
+    QTDISPTestDev *tdisp = obj;
+    uint8_t slot_mask, slot_id = 0;
+    uint8_t cert_chain[SPDM_MAX_SLOT_COUNT][LIBSPDM_MAX_CERT_CHAIN_SIZE];
+    size_t cert_chain_size;
+    uint32_t session_id;
+
+    qpci_device_enable(&tdisp->dev);
+    assert_libspdm_is_success(
+        libspdm_init_connection(tdisp->spdm_context, false));
+    assert_libspdm_is_success(
+        libspdm_get_digest(tdisp->spdm_context, NULL, &slot_mask, NULL));
+    g_assert_cmpuint(slot_mask, !=, 0);
+
+    for (; slot_id < SPDM_MAX_SLOT_COUNT; ++slot_id) {
+        if (slot_mask & (1 << slot_id)) {
+            cert_chain_size = sizeof(cert_chain[slot_id]);
+            assert_libspdm_is_success(
+                libspdm_get_certificate(tdisp->spdm_context, NULL, slot_id,
+                    &cert_chain_size, cert_chain[slot_id]));
+            break;
+        }
+    }
+
+    assert_libspdm_is_success(
+        libspdm_start_session(tdisp->spdm_context, false, NULL, 0,
+         SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH, slot_id, 0,
+         &session_id, NULL, NULL));
+    assert_libspdm_is_success(
+        libspdm_stop_session(tdisp->spdm_context, session_id, 0));
+}
+
 static void tdisp_testdev_register_driver(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -548,6 +582,8 @@ static void tdisp_testdev_register_tests(void)
     qos_add_test("get-vca", "tdisp-testdev", tdisp_testdev_get_vca, NULL);
     qos_add_test(
         "authenticate", "tdisp-testdev", tdisp_testdev_authenticate, NULL);
+    qos_add_test(
+        "secure-session", "tdisp-testdev", tdisp_testdev_secure_session, NULL);
 }
 
 libqos_init(tdisp_testdev_register_driver);
