@@ -83,9 +83,84 @@ static bool tdsip_testdev_receive_message(
 
 static bool tdisp_testdev_get_response(
     DeviceState *dev, const uint32_t *session_id, size_t request_size,
-    const void *request, size_t *response_size, void *response)
+    const SPDMHeader *request, size_t *response_size, SPDMHeader *response)
 {
-    return false;
+    PCIDevice *pdev = PCI_DEVICE(dev);
+    TDISPTestDevState *tdisp = TDISP_TEST_DEV(dev);
+    SPDMPCIDefined *request_header, *response_header;
+    PCIPayload *request_payload, *response_payload;
+    size_t request_payload_size, response_payload_size;
+    SPDMErrorCode error_code;
+    bool success;
+
+    assert(session_id && response && response_size);
+
+    if (request_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
+        return false;
+    }
+
+    if (*response_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
+        return false;
+    }
+
+    request_header = (SPDMPCIDefined *)request;
+    response_header = (SPDMPCIDefined *)response;
+
+    if (request_header->vendor_defined.header.request_response_code !=
+        SPDM_REQUEST_CODE_VENDOR_DEFINED_REQUEST)
+    {
+        return false;
+    }
+
+    if (request_header->vendor_defined.standard_id !=
+        SPDM_STANDARD_ID_PCISIG) {
+        return false;
+    }
+
+    if (request_header->vendor_defined.len !=
+        sizeof(request_header->vendor_id) ||
+        request_header->vendor_id != SPDM_VENDOR_ID_PCISIG) {
+        return false;
+    }
+
+    if (request_size < sizeof(SPDMPCIDefined) + request_header->req_length) {
+        return false;
+    }
+
+    request_payload = (PCIPayload *)
+        ((uint8_t *)request + sizeof(SPDMPCIDefined));
+    request_payload_size = request_header->req_length;
+    response_payload = (PCIPayload *)
+        ((uint8_t *)response + sizeof(SPDMPCIDefined));
+    response_payload_size = *response_size - sizeof(SPDMPCIDefined);
+
+    switch (request_payload->protocol_id) {
+    case PCI_SPDM_PROTOCOL_ID_IDE_KM:
+        success = pcie_ide_km_get_response(
+            pdev, *session_id, request_payload, request_payload_size,
+            response_payload, &response_payload_size, &error_code);
+        break;
+    case PCI_SPDM_PROTOCOL_ID_TDISP:
+        success = false;
+        break;
+    default:
+        success = false;
+        break;
+    };
+
+    if (UINT16_MAX < response_payload_size) {
+        return false;
+    }
+
+    response_header->vendor_defined.header.spdm_version =
+        spdm_responder_get_connection_version(tdisp->spdm_responder);
+    response_header->vendor_defined.header.request_response_code =
+        SPDM_RESPONSE_CODE_VENDOR_DEFINED_RESPONSE;
+    response_header->vendor_defined.standard_id = SPDM_STANDARD_ID_PCISIG;
+    response_header->vendor_defined.len = sizeof(response_header->vendor_id);
+    response_header->vendor_id = SPDM_VENDOR_ID_PCISIG;
+    response_header->req_length = response_payload_size;
+    return success;
 }
 
 static bool tdisp_testdev_handle_request(DOECap *cap)
@@ -108,6 +183,10 @@ static DOEProtocol doe_protocols[] = {
     { },
 };
 
+static SelectiveIDEStream sel_ide_streams[] = {
+    { .ide_addr_assoc_blks_num = 0 },
+};
+
 static void tdisp_testdev_realize(PCIDevice *pdev, Error **errp)
 {
     ERRP_GUARD();
@@ -120,11 +199,15 @@ static void tdisp_testdev_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
+    pcie_endpoint_cap_init(pdev, 0x80);
     memory_region_init_io(&d->mmio, OBJECT(d), &mmio_ops, d,
         "tdisp-testdev-mmio", 4 * KiB);
     pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
-    pcie_doe_init(pdev, &pdev->doe_spdm, PCI_CONFIG_SPACE_SIZE, doe_protocols,
-        true, 0);
+    pcie_doe_init(
+        pdev, &pdev->doe_spdm, PCI_CONFIG_SPACE_SIZE, doe_protocols, true, 0);
+    pcie_ide_init(
+        pdev, PCI_CONFIG_SPACE_SIZE + PCI_DOE_SIZEOF, true, NULL, 0,
+        sel_ide_streams, ARRAY_SIZE(sel_ide_streams));
 
     if (!device_spdm_responder_init(DEVICE(d), d->spdm_responder,
             tdisp_testdev_send_message, tdsip_testdev_receive_message,

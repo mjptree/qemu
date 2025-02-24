@@ -90,15 +90,22 @@ typedef enum PCIExpLinkWidth {
 #define PCI_ERR_VER                     2
 #define PCI_ERR_SIZEOF                  0x48
 
+/* AER uncorrectable */
 #define PCI_ERR_UNC_SDN                 0x00000020      /* surprise down */
 #define PCI_ERR_UNC_ACSV                0x00200000      /* ACS Violation */
 #define PCI_ERR_UNC_INTN                0x00400000      /* Internal Error */
 #define PCI_ERR_UNC_MCBTLP              0x00800000      /* MC Blcoked TLP */
 #define PCI_ERR_UNC_ATOP_EBLOCKED       0x01000000      /* atomic op egress blocked */
 #define PCI_ERR_UNC_TLP_PRF_BLOCKED     0x02000000      /* TLP Prefix Blocked */
+#define PCI_ERR_UNC_IDE_CHK             0x10000000      /* IDE Check Failed */
+#define PCI_ERR_UNC_MISR_IDE_TLP        0x20000000      /* Misrouted IDE TLP */
+#define PCI_ERR_UNC_PCRC_CHK            0x40000000      /* PCRC Check Failed */
+
+/* AER correctable */
 #define PCI_ERR_COR_ADV_NONFATAL        0x00002000      /* Advisory Non-Fatal */
 #define PCI_ERR_COR_INTERNAL            0x00004000      /* Corrected Internal */
 #define PCI_ERR_COR_HL_OVERFLOW         0x00008000      /* Header Long Overflow */
+
 #define PCI_ERR_CAP_FEP_MASK            0x0000001f
 #define PCI_ERR_CAP_MHRC                0x00000200
 #define PCI_ERR_CAP_MHRE                0x00000400
@@ -141,7 +148,10 @@ typedef enum PCIExpLinkWidth {
                                          PCI_ERR_UNC_INTN |             \
                                          PCI_ERR_UNC_MCBTLP |           \
                                          PCI_ERR_UNC_ATOP_EBLOCKED |    \
-                                         PCI_ERR_UNC_TLP_PRF_BLOCKED)
+                                         PCI_ERR_UNC_TLP_PRF_BLOCKED |  \
+                                         PCI_ERR_UNC_IDE_CHK |          \
+                                         PCI_ERR_UNC_MISR_IDE_TLP |     \
+                                         PCI_ERR_UNC_PCRC_CHK)
 
 #define PCI_ERR_UNC_MASK_DEFAULT        (PCI_ERR_UNC_INTN | \
                                          PCI_ERR_UNC_TLP_PRF_BLOCKED)
@@ -151,7 +161,8 @@ typedef enum PCIExpLinkWidth {
                                          PCI_ERR_UNC_FCP |              \
                                          PCI_ERR_UNC_RX_OVER |          \
                                          PCI_ERR_UNC_MALF_TLP |         \
-                                         PCI_ERR_UNC_INTN)
+                                         PCI_ERR_UNC_INTN |             \
+                                         PCI_ERR_UNC_IDE_CHK)
 
 #define PCI_ERR_COR_SUPPORTED           (PCI_ERR_COR_RCVR |             \
                                          PCI_ERR_COR_BAD_TLP |          \

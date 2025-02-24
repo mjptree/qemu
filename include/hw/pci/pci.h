@@ -175,7 +175,12 @@ enum {
 #include "hw/pci/pci_regs.h"
 
 /* PCI HEADER_TYPE */
+#define  PCI_HEADER_TYPE_LAYOUT 0x7f
 #define  PCI_HEADER_TYPE_MULTI_FUNCTION 0x80
+
+/* Configuration Space Header Types */
+#define  PCI_HEADER_TYPE_0  0x00
+#define  PCI_HEADER_TYPE_1  0x01
 
 /* Size of the standard PCI config header */
 #define PCI_CONFIG_HEADER_SIZE 0x40
@@ -222,6 +227,10 @@ enum {
     QEMU_PCIE_EXT_TAG = (1 << QEMU_PCIE_EXT_TAG_BITNR),
 #define QEMU_PCI_CAP_PM_BITNR 14
     QEMU_PCI_CAP_PM = (1 << QEMU_PCI_CAP_PM_BITNR),
+#define QEMU_PCIE_IDE_BITNR 15
+    QEMU_PCIE_CAP_IDE = (1 << QEMU_PCIE_IDE_BITNR),
+#define QEMU_PCIE_TDISP_BITNR 16
+    QEMU_PCIE_CAP_TDISP = (1 << QEMU_PCIE_TDISP_BITNR)
 };
 
 typedef struct PCIINTxRoute {
@@ -261,6 +270,7 @@ uint32_t pci_default_read_config(PCIDevice *d,
                                  uint32_t address, int len);
 void pci_default_write_config(PCIDevice *d,
                               uint32_t address, uint32_t val, int len);
+bool pci_is_header_type0(PCIDevice *dev);
 void pci_device_save(PCIDevice *s, QEMUFile *f);
 int pci_device_load(PCIDevice *s, QEMUFile *f);
 MemoryRegion *pci_address_space(PCIDevice *dev);

@@ -595,6 +595,26 @@ void add_qpci_address(QOSGraphEdgeOptions *opts, QPCIAddress *addr)
     opts->size_arg = sizeof(QPCIAddress);
 }
 
+uint16_t qpcie_find_capability(QPCIDevice *dev, uint16_t id)
+{
+    uint16_t offset = PCI_CONFIG_SPACE_SIZE, next;
+    uint32_t header = qpcie_config_readl(dev, offset);
+
+    if (!header) {
+        return 0;
+    }
+
+    for (next = offset; next && id != PCI_EXT_CAP_ID(header);
+         next = PCI_EXT_CAP_NEXT(header)) {
+        g_assert_cmpuint(next, >=, PCI_CONFIG_SPACE_SIZE);
+        g_assert_cmpuint(next, <, PCIE_CONFIG_SPACE_SIZE);
+        offset = next;
+        header = qpcie_config_readl(dev, next);
+    }
+
+    return offset;
+}
+
 uint8_t qpcie_config_readb(QPCIDevice *dev, uint16_t offset)
 {
     QPCIeBus *bus = (QPCIeBus *)dev->bus;

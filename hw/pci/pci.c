@@ -26,6 +26,7 @@
 #include "qemu/datadir.h"
 #include "qemu/units.h"
 #include "hw/irq.h"
+#include "hw/spdm/spdm-responder.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
@@ -914,6 +915,11 @@ const VMStateDescription vmstate_pci_device = {
     }
 };
 
+bool pci_is_header_type0(PCIDevice *dev)
+{
+    return PCI_HEADER_TYPE_0 ==
+        (dev->config[PCI_HEADER_TYPE] & PCI_HEADER_TYPE_LAYOUT);
+}
 
 void pci_device_save(PCIDevice *s, QEMUFile *f)
 {
@@ -1789,6 +1795,7 @@ void pci_default_write_config(PCIDevice *d, uint32_t addr, uint32_t val_in, int 
     msi_write_config(d, addr, val_in, l);
     msix_write_config(d, addr, val_in, l);
     pcie_sriov_config_write(d, addr, val_in, l);
+    pcie_ide_config_write(d, addr, val_in, l);
 }
 
 /***********************************************************/

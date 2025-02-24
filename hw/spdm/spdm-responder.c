@@ -24,6 +24,13 @@ bool spdm_responder_dispatch_message(SPDMResponder *responder, Error **errp)
     return class->dispatch_message(responder, errp);
 }
 
+uint8_t spdm_responder_get_connection_version(SPDMResponder *responder)
+{
+    SPDMResponderClass *class = SPDM_RESPONDER_GET_CLASS(responder);
+    assert(class->get_connection_version);
+    return class->get_connection_version(responder);
+}
+
 static void spdm_responder_init(Object *obj)
 {
 }

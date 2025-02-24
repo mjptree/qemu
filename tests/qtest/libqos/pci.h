@@ -144,6 +144,8 @@ void qpci_unplug_acpi_device_test(QTestState *qs, const char *id, uint8_t slot);
 
 void add_qpci_address(QOSGraphEdgeOptions *opts, QPCIAddress *addr);
 
+uint16_t qpcie_find_capability(QPCIDevice *dev, uint16_t id);
+
 uint8_t qpcie_config_readb(QPCIDevice *dev, uint16_t offset);
 uint16_t qpcie_config_readw(QPCIDevice *dev, uint16_t offset);
 uint32_t qpcie_config_readl(QPCIDevice *dev, uint16_t offset);

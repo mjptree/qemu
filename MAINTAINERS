@@ -2035,6 +2035,12 @@ S: Supported
 F: include/hw/pci/pcie_doe.h
 F: hw/pci/pcie_doe.c
 
+PCIE IDE
+M: Michael Prantl <michael.prantl@hotmail.de>
+S: Supported
+F: include/hw/pci/pcie_ide.h
+F: hw/pci/pcie_ide.c
+
 PCIE TDISP
 M: Michael Prantl <michael.prantl@hotmail.de>
 S: Maintained

@@ -9,17 +9,25 @@ openssl rsa -in ca.key -outform der -out ca.key.der
 openssl req -nodes -newkey rsa:3072 -keyout intermediate.key \
     -out intermediate.req -sha384 -batch \
     -subj "/CN=QEMU spdm-responder RSA intermediate cert"
+openssl req -nodes -newkey rsa:3072 -keyout root-port.key -out root-port.req \
+    -sha384 -batch -subj "/CN=QEMU spdm-responder RSA root-port cert"
 openssl req -nodes -newkey rsa:3072 -keyout device.key -out device.req \
     -sha384 -batch -subj "/CN=QEMU spdm-responder RSA device cert"
 openssl x509 -req -in intermediate.req -out intermediate.cert -CA ca.cert \
     -CAkey ca.key -sha384 -days 3650 -set_serial 1 -extensions v3_inter \
     -extfile ../openssl.cnf
+openssl x509 -req -in root-port.req -out root-port.cert -CA intermediate.cert \
+    -CAkey intermediate.key -sha384 -days 3650 -set_serial 2 \
+    -extensions v3_end -extfile ../openssl.cnf
 openssl x509 -req -in device.req -out device.cert -CA intermediate.cert \
     -CAkey intermediate.key -sha384 -days 3650 -set_serial 3 \
     -extensions v3_end -extfile ../openssl.cnf
 openssl asn1parse -in ca.cert -out ca.cert.der
 openssl asn1parse -in intermediate.cert -out intermediate.cert.der
+openssl asn1parse -in root-port.cert -out root-port.cert.der
 openssl asn1parse -in device.cert -out device.cert.der
+cat ca.cert.der intermediate.cert.der root-port.cert.der > \
+    root-port.certchain.der
 cat ca.cert.der intermediate.cert.der device.cert.der > device.certchain.der
 popd
 
@@ -32,17 +40,26 @@ openssl pkey -in ca.key -outform der -out ca.key.der
 openssl req -nodes -newkey ec:param.pem -keyout intermediate.key \
     -out intermediate.req -sha256 -batch \
     -subj "/CN=QEMU spdm-responder ECP256 intermediate cert"
+openssl req -nodes -newkey ec:param.pem -keyout root-port.key \
+    -out root-port.req -sha256 -batch \
+    -subj "/CN=QEMU spdm-responder ECP256 root-port cert"
 openssl req -nodes -newkey ec:param.pem -keyout device.key -out device.req \
     -sha256 -batch -subj "/CN=QEMU spdm-responder ECP256 device cert"
 openssl x509 -req -in intermediate.req -out intermediate.cert -CA ca.cert \
     -CAkey ca.key -sha256 -days 3650 -set_serial 1 -extensions v3_inter \
     -extfile ../openssl.cnf
+openssl x509 -req -in root-port.req -out root-port.cert -CA intermediate.cert \
+    -CAkey intermediate.key -sha256 -days 3650 -set_serial 2 \
+    -extensions v3_end -extfile ../openssl.cnf
 openssl x509 -req -in device.req -out device.cert -CA intermediate.cert \
     -CAkey intermediate.key -sha256 -days 3650 -set_serial 3 \
     -extensions v3_end -extfile ../openssl.cnf
 openssl asn1parse -in ca.cert -out ca.cert.der
 openssl asn1parse -in intermediate.cert -out intermediate.cert.der
+openssl asn1parse -in root-port.cert -out root-port.cert.der
 openssl asn1parse -in device.cert -out device.cert.der
+cat ca.cert.der intermediate.cert.der root-port.cert.der > \
+    root-port.certchain.der
 cat ca.cert.der intermediate.cert.der device.cert.der > device.certchain.der
 popd
 
@@ -55,16 +72,25 @@ openssl pkey -in ca.key -outform der -out ca.key.der
 openssl req -nodes -newkey ec:param.pem -keyout intermediate.key \
     -out intermediate.req -sha384 -batch \
     -subj "/CN=QEMU spdm-responder ECP384 intermediate cert"
+openssl req -nodes -newkey ec:param.pem -keyout root-port.key \
+    -out root-port.req -sha256 -batch \
+    -subj "/CN=QEMU spdm-responder ECP384 root-port cert"
 openssl req -nodes -newkey ec:param.pem -keyout device.key -out device.req \
     -sha384 -batch -subj "/CN=QEMU spdm-responder ECP384 device cert"
 openssl x509 -req -in intermediate.req -out intermediate.cert -CA ca.cert \
     -CAkey ca.key -sha384 -days 3650 -set_serial 1 -extensions v3_inter \
     -extfile ../openssl.cnf
+openssl x509 -req -in root-port.req -out root-port.cert -CA intermediate.cert \
+    -CAkey intermediate.key -sha384 -days 3650 -set_serial 2 \
+    -extensions v3_end -extfile ../openssl.cnf
 openssl x509 -req -in device.req -out device.cert -CA intermediate.cert \
     -CAkey intermediate.key -sha384 -days 3650 -set_serial 3 \
     -extensions v3_end -extfile ../openssl.cnf
 openssl asn1parse -in ca.cert -out ca.cert.der
 openssl asn1parse -in intermediate.cert -out intermediate.cert.der
+openssl asn1parse -in root-port.cert -out root-port.cert.der
 openssl asn1parse -in device.cert -out device.cert.der
+cat ca.cert.der intermediate.cert.der root-port.cert.der > \
+    root-port.certchain.der
 cat ca.cert.der intermediate.cert.der device.cert.der > device.certchain.der
 popd

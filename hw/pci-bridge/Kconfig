@@ -7,6 +7,7 @@ config PCIE_PORT
     bool
     default y if PCI_DEVICES
     depends on PCI_EXPRESS && MSI_NONBROKEN
+    select SPDM
 
 config PCIE_PCI_BRIDGE
     bool

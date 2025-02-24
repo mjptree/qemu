@@ -51,6 +51,7 @@ static uint32_t pcie_aer_uncor_default_severity(uint32_t status)
     case PCI_ERR_UNC_RX_OVER:
     case PCI_ERR_UNC_FCP:
     case PCI_ERR_UNC_MALF_TLP:
+    case PCI_ERR_UNC_IDE_CHK:
         return PCI_ERR_ROOT_CMD_FATAL_EN;
     case PCI_ERR_UNC_POISON_TLP:
     case PCI_ERR_UNC_ECRC:
@@ -62,6 +63,8 @@ static uint32_t pcie_aer_uncor_default_severity(uint32_t status)
     case PCI_ERR_UNC_MCBTLP:
     case PCI_ERR_UNC_ATOP_EBLOCKED:
     case PCI_ERR_UNC_TLP_PRF_BLOCKED:
+    case PCI_ERR_UNC_MISR_IDE_TLP:
+    case PCI_ERR_UNC_PCRC_CHK:
         return PCI_ERR_ROOT_CMD_NONFATAL_EN;
     default:
         abort();

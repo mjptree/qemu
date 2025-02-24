@@ -10,6 +10,8 @@
 
 /*< libspdm >*/
 #include "industry_standard/spdm.h"
+#include "industry_standard/pci_idekm.h"
+#include "industry_standard/pci_tdisp.h"
 #include "hal/library/requester/reqasymsignlib.h"
 #include "hal/library/responder/asymsignlib.h"
 #include "hal/library/responder/csrlib.h"
@@ -35,14 +37,22 @@
 #define assert_libspdm_is_success(status) \
     g_assert_cmpuint(status, ==, LIBSPDM_STATUS_SUCCESS)
 
-typedef struct QTDISPTestDev {
-    QOSGraphObject obj;
-    QPCIDevice dev;
+typedef struct QPCIResponder {
+    QPCIDevice pci;
+    uint16_t doe_offset;
+    uint16_t ide_offset;
+    uint32_t session_id;
     void *spdm_context;
     void *scratch_buffer;
     void *sender_buffer;
     void *receiver_buffer;
     gchar *root_certs[LIBSPDM_MAX_ROOT_CERT_SUPPORT];
+} QPCIResponder;
+
+typedef struct QTDISPTestDev {
+    QOSGraphObject obj;
+    QPCIResponder root_port;
+    QPCIResponder device;
 } QTDISPTestDev;
 
 bool libspdm_requester_data_sign(
@@ -157,33 +167,33 @@ bool libspdm_write_certificate_to_nvm(
     return false;
 }
 
-static QTDISPTestDev *tdisp_testdev_get_from_context(void *spdm_context)
+static QPCIResponder *tdisp_testdev_get_from_context(void *spdm_context)
 {
     libspdm_data_parameter_t parameter;
     libspdm_return_t status;
-    void *dev = NULL;
-    size_t data_size = sizeof(dev);
+    void *responder = NULL;
+    size_t data_size = sizeof(responder);
     parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
     status = libspdm_get_data(
-        spdm_context, LIBSPDM_DATA_APP_CONTEXT_DATA, &parameter, &dev,
+        spdm_context, LIBSPDM_DATA_APP_CONTEXT_DATA, &parameter, &responder,
         &data_size);
     assert(LIBSPDM_STATUS_IS_SUCCESS(status));
-    return dev;
+    return responder;
 }
 
 static libspdm_return_t tdisp_testdev_acquire_sender_buffer(
     void *spdm_context, void **msg_buf_ptr)
 {
-    QTDISPTestDev *dev = tdisp_testdev_get_from_context(spdm_context);
-    *msg_buf_ptr = dev->sender_buffer;
+    QPCIResponder *responder = tdisp_testdev_get_from_context(spdm_context);
+    *msg_buf_ptr = responder->sender_buffer;
     return LIBSPDM_STATUS_SUCCESS;
 }
 
 static libspdm_return_t tdisp_testdev_acquire_receiver_buffer(
     void *spdm_context, void **msg_buf_ptr)
 {
-    QTDISPTestDev *dev = tdisp_testdev_get_from_context(spdm_context);
-    *msg_buf_ptr = dev->receiver_buffer;
+    QPCIResponder *responder = tdisp_testdev_get_from_context(spdm_context);
+    *msg_buf_ptr = responder->receiver_buffer;
     return LIBSPDM_STATUS_SUCCESS;
 }
 
@@ -196,7 +206,7 @@ static libspdm_return_t tdisp_testdev_send_message(
     void *spdm_context, size_t message_size, const void *message,
     uint64_t timeout)
 {
-    QTDISPTestDev *dev = tdisp_testdev_get_from_context(spdm_context);
+    QPCIResponder *responder = tdisp_testdev_get_from_context(spdm_context);
     const uint32_t *data = message;
     uint32_t value;
 
@@ -204,7 +214,7 @@ static libspdm_return_t tdisp_testdev_send_message(
 
     do {
         value = qpcie_config_readl(
-            &dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_STATUS);
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_STATUS);
     } while (FIELD_EX32(value, PCI_DOE_CAP_STATUS, DOE_BUSY));
 
     if (FIELD_EX32(value, PCI_DOE_CAP_STATUS, DOE_ERROR)) {
@@ -212,19 +222,21 @@ static libspdm_return_t tdisp_testdev_send_message(
     }
 
     for (size_t index; index < message_size / sizeof(uint32_t); ++index) {
-        qpcie_config_writel(&dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_WR_DATA_MBOX,
-                            data[index]);
+        qpcie_config_writel(
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_WR_DATA_MBOX,
+            data[index]);
     }
 
     value = FIELD_DP32(0, PCI_DOE_CAP_CONTROL, DOE_GO, 1);
-    qpcie_config_writel(&dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_CTRL, value);
+    qpcie_config_writel(
+        &responder->pci, responder->doe_offset + PCI_EXP_DOE_CTRL, value);
     return LIBSPDM_STATUS_SUCCESS;
 }
 
 static libspdm_return_t tdisp_testdev_receive_message(
     void *spdm_context, size_t *message_size, void **message, uint64_t timeout)
 {
-    QTDISPTestDev *dev = tdisp_testdev_get_from_context(spdm_context);
+    QPCIResponder *responder = tdisp_testdev_get_from_context(spdm_context);
     uint32_t *data = *message;
     uint32_t value;
     size_t index, length;
@@ -233,7 +245,7 @@ static libspdm_return_t tdisp_testdev_receive_message(
 
     do {
         value = qpcie_config_readl(
-            &dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_STATUS);
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_STATUS);
 
         if (FIELD_EX32(value, PCI_DOE_CAP_STATUS, DOE_ERROR)) {
             return LIBSPDM_STATUS_RECEIVE_FAIL;
@@ -247,12 +259,13 @@ static libspdm_return_t tdisp_testdev_receive_message(
                 LIBSPDM_STATUS_RECEIVE_FAIL : LIBSPDM_STATUS_SUCCESS;
         }
 
-        data[index] = qpcie_config_readl(&dev->dev, PCI_EXP_DOE +
-                                         PCI_EXP_DOE_RD_DATA_MBOX);
+        data[index] = qpcie_config_readl(
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_RD_DATA_MBOX);
         qpcie_config_writel(
-            &dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_RD_DATA_MBOX, 0);
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_RD_DATA_MBOX,
+            0);
         value = qpcie_config_readl(
-            &dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_STATUS);
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_STATUS);
     }
 
     length = pcie_doe_data_object_length_in_dword((DOEHeader *)data);
@@ -263,12 +276,13 @@ static libspdm_return_t tdisp_testdev_receive_message(
             break;
         }
 
-        data[index] = qpcie_config_readl(&dev->dev, PCI_EXP_DOE +
-                                         PCI_EXP_DOE_RD_DATA_MBOX);
+        data[index] = qpcie_config_readl(
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_RD_DATA_MBOX);
         qpcie_config_writel(
-            &dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_RD_DATA_MBOX, 0);
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_RD_DATA_MBOX,
+            0);
         value = qpcie_config_readl(
-            &dev->dev, PCI_EXP_DOE + PCI_EXP_DOE_STATUS);
+            &responder->pci, responder->doe_offset + PCI_EXP_DOE_STATUS);
     }
 
     *message_size = index * sizeof(uint32_t);
@@ -312,7 +326,7 @@ static void tdisp_testdev_pci_init(
     qpci_device_enable(dev);
 }
 
-static void tdisp_load_peer_root_certs(QTDISPTestDev *dev)
+static void tdisp_load_peer_root_certs(QPCIResponder *responder)
 {
     const gchar cert_dirname[] = "tests/data/tdisp";
     const gchar *root_cert_filenames[] = {
@@ -331,20 +345,22 @@ static void tdisp_load_peer_root_certs(QTDISPTestDev *dev)
         root_cert_filename = g_build_filename(
             cert_dirname, root_cert_filenames[index], NULL);
         g_assert_true(
-            g_file_get_contents(root_cert_filename, &dev->root_certs[index],
+            g_file_get_contents(
+                root_cert_filename, &responder->root_certs[index],
                 &root_cert_size, NULL));
-        assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-            LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT, &parameter,
-            dev->root_certs[index], root_cert_size));
+        assert_libspdm_is_success(
+            libspdm_set_data(
+                responder->spdm_context, LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT,
+                &parameter, responder->root_certs[index], root_cert_size));
         g_free(root_cert_filename);
     }
 
     for (; index < LIBSPDM_MAX_ROOT_CERT_SUPPORT; ++index) {
-        dev->root_certs[index] = NULL;
+        responder->root_certs[index] = NULL;
     }
 }
 
-static void tdisp_testdev_spdm_init(QTDISPTestDev *dev)
+static void tdisp_testdev_spdm_init(QPCIResponder *responder)
 {
     libspdm_data_parameter_t parameter;
     size_t scratch_buffer_size;
@@ -369,83 +385,119 @@ static void tdisp_testdev_spdm_init(QTDISPTestDev *dev)
     uint16_t key_schedule = SPDM_ALGORITHMS_KEY_SCHEDULE_HMAC_HASH;
     uint8_t other_params = SPDM_ALGORITHMS_OPAQUE_DATA_FORMAT_1;
 
-    dev->spdm_context = g_malloc(libspdm_get_context_size());
-    assert_libspdm_is_success(libspdm_init_context(dev->spdm_context));
+    responder->spdm_context = g_malloc(libspdm_get_context_size());
+    assert_libspdm_is_success(libspdm_init_context(responder->spdm_context));
 
-    dev->sender_buffer = g_malloc0(SENDER_BUFFER_SIZE);
-    dev->receiver_buffer = g_malloc0(RECEIVER_BUFFER_SIZE);
-    libspdm_register_device_io_func(dev->spdm_context,
-        tdisp_testdev_send_message,
+    responder->sender_buffer = g_malloc0(SENDER_BUFFER_SIZE);
+    responder->receiver_buffer = g_malloc0(RECEIVER_BUFFER_SIZE);
+    libspdm_register_device_io_func(
+        responder->spdm_context, tdisp_testdev_send_message,
         tdisp_testdev_receive_message);
-    libspdm_register_transport_layer_func(dev->spdm_context,
-        0x1200,
+    libspdm_register_transport_layer_func(
+        responder->spdm_context, 0x1200,
         LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE,
         LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE,
         libspdm_transport_pci_doe_encode_message,
         libspdm_transport_pci_doe_decode_message);
-    libspdm_register_device_buffer_func(dev->spdm_context,
-        SENDER_BUFFER_SIZE, RECEIVER_BUFFER_SIZE,
-        tdisp_testdev_acquire_sender_buffer,
-        tdisp_testdev_release_buffer,
-        tdisp_testdev_acquire_receiver_buffer,
-        tdisp_testdev_release_buffer);
+    libspdm_register_device_buffer_func(
+        responder->spdm_context, SENDER_BUFFER_SIZE, RECEIVER_BUFFER_SIZE,
+        tdisp_testdev_acquire_sender_buffer, tdisp_testdev_release_buffer,
+        tdisp_testdev_acquire_receiver_buffer, tdisp_testdev_release_buffer);
 
     scratch_buffer_size =
-        libspdm_get_sizeof_required_scratch_buffer(dev->spdm_context);
-    dev->scratch_buffer = g_malloc0(scratch_buffer_size);
-    libspdm_set_scratch_buffer(dev->spdm_context, dev->scratch_buffer,
+        libspdm_get_sizeof_required_scratch_buffer(responder->spdm_context);
+    responder->scratch_buffer = g_malloc0(scratch_buffer_size);
+    libspdm_set_scratch_buffer(
+        responder->spdm_context, responder->scratch_buffer,
         scratch_buffer_size);
 
     parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_CAPABILITY_FLAGS, &parameter, &capabilities,
-        sizeof(capabilities)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter, &base_asym_algo,
-        sizeof(base_asym_algo)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_BASE_HASH_ALGO, &parameter, &base_hash_algo,
-        sizeof(base_hash_algo)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_DHE_NAME_GROUP, &parameter, &dhe_named_group,
-        sizeof(dhe_named_group)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_AEAD_CIPHER_SUITE, &parameter, &aead_cipher_suite,
-        sizeof(aead_cipher_suite)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_KEY_SCHEDULE, &parameter, &key_schedule,
-        sizeof(key_schedule)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_APP_CONTEXT_DATA, &parameter, &dev, sizeof(dev)));
-    assert_libspdm_is_success(libspdm_set_data(dev->spdm_context,
-        LIBSPDM_DATA_OTHER_PARAMS_SUPPORT, &parameter, &other_params,
-        sizeof(other_params)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS,
+            &parameter, &capabilities, sizeof(capabilities)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &parameter,
+            &base_asym_algo, sizeof(base_asym_algo)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &parameter,
+            &base_hash_algo, sizeof(base_hash_algo)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_DHE_NAME_GROUP, &parameter,
+            &dhe_named_group, sizeof(dhe_named_group)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_AEAD_CIPHER_SUITE,
+            &parameter, &aead_cipher_suite, sizeof(aead_cipher_suite)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_KEY_SCHEDULE, &parameter,
+            &key_schedule, sizeof(key_schedule)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_APP_CONTEXT_DATA,
+            &parameter, &responder, sizeof(responder)));
+    assert_libspdm_is_success(
+        libspdm_set_data(
+            responder->spdm_context, LIBSPDM_DATA_OTHER_PARAMS_SUPPORT,
+            &parameter, &other_params, sizeof(other_params)));
 
-    tdisp_load_peer_root_certs(dev);
-    g_assert_true(libspdm_check_context(dev->spdm_context));
+    tdisp_load_peer_root_certs(responder);
+    g_assert_true(libspdm_check_context(responder->spdm_context));
+}
+
+static void tdisp_testdev_responder_destructor(QPCIResponder *responder)
+{
+    libspdm_deinit_context(responder->spdm_context);
+    g_free(responder->spdm_context);
+    g_free(responder->scratch_buffer);
+    g_free(responder->sender_buffer);
+    g_free(responder->receiver_buffer);
+
+    for (size_t index = 0; index < LIBSPDM_MAX_ROOT_CERT_SUPPORT; ++index) {
+        g_free(responder->root_certs[index]);
+    }
 }
 
 static void tdisp_testdev_destructor(QOSGraphObject *obj)
 {
-    QTDISPTestDev *dev = (QTDISPTestDev *)obj;
-    libspdm_deinit_context(dev->spdm_context);
-    g_free(dev->spdm_context);
-    g_free(dev->scratch_buffer);
-    g_free(dev->sender_buffer);
-    g_free(dev->receiver_buffer);
+    QTDISPTestDev *tdisp = (QTDISPTestDev *)obj;
+    tdisp_testdev_responder_destructor(&tdisp->device);
+    tdisp_testdev_responder_destructor(&tdisp->root_port);
+}
 
-    for (size_t index = 0; index < LIBSPDM_MAX_ROOT_CERT_SUPPORT; ++index) {
-        g_free(dev->root_certs[index]);
-    }
+static void tdisp_testdev_find_pcie_ext_caps(QPCIResponder *responder)
+{
+    uint16_t doe_offset = qpcie_find_capability(
+        &responder->pci, PCI_EXT_CAP_ID_DOE);
+    uint16_t ide_offset = qpcie_find_capability(
+        &responder->pci, PCI_EXT_CAP_ID_IDE);
+    g_assert_cmpuint(doe_offset, !=, 0);
+    g_assert_cmpuint(ide_offset, !=, 0);
+    responder->doe_offset = doe_offset;
+    responder->ide_offset = ide_offset;
 }
 
 static void *tdisp_testdev_create(
     void *pci_bus, QGuestAllocator *alloc, void *addr)
 {
     QTDISPTestDev *tdisp = g_new0(QTDISPTestDev, 1);
+    QPCIAddress root_port_addr = {
+        .devfn = QPCI_DEVFN(4, 0),
+        .vendor_id = PCI_VENDOR_ID_REDHAT,
+        .device_id = PCI_DEVICE_ID_REDHAT_PCIE_RP,
+    };
 
-    tdisp_testdev_pci_init(&tdisp->dev, pci_bus, addr);
-    tdisp_testdev_spdm_init(tdisp);
+    tdisp_testdev_pci_init(&tdisp->device.pci, pci_bus, addr);
+    qpci_device_init(&tdisp->root_port.pci, pci_bus, &root_port_addr);
+    qpci_device_enable(&tdisp->root_port.pci);
+    tdisp_testdev_spdm_init(&tdisp->device);
+    tdisp_testdev_spdm_init(&tdisp->root_port);
+    tdisp_testdev_find_pcie_ext_caps(&tdisp->device);
+    tdisp_testdev_find_pcie_ext_caps(&tdisp->root_port);
 
     tdisp->obj.destructor = tdisp_testdev_destructor;
     return &tdisp->obj;
@@ -463,21 +515,23 @@ static void tdisp_testdev_get_vca(
     size_t size = sizeof(connection_state);
     uint32_t value;
 
-    qpci_device_enable(&tdisp->dev);
     assert_libspdm_is_success(
-        libspdm_get_data(tdisp->spdm_context, LIBSPDM_DATA_CONNECTION_STATE,
+        libspdm_get_data(
+            tdisp->device.spdm_context, LIBSPDM_DATA_CONNECTION_STATE,
             &parameter, &connection_state, &size));
     g_assert_cmpuint(
         connection_state, ==, LIBSPDM_CONNECTION_STATE_NOT_STARTED);
 
     assert_libspdm_is_success(
-        libspdm_init_connection(tdisp->spdm_context, false));
-    value = qpcie_config_readw(&tdisp->dev, PCI_EXP_DOE + PCI_EXP_DOE_STATUS);
+        libspdm_init_connection(tdisp->device.spdm_context, false));
+    value = qpcie_config_readw(
+        &tdisp->device.pci, tdisp->device.doe_offset + PCI_EXP_DOE_STATUS);
     g_assert_false(FIELD_EX32(value, PCI_DOE_CAP_STATUS, DATA_OBJ_RDY));
     g_assert_false(FIELD_EX32(value, PCI_DOE_CAP_STATUS, DOE_ERROR));
 
     assert_libspdm_is_success(
-        libspdm_get_data(tdisp->spdm_context, LIBSPDM_DATA_CONNECTION_STATE,
+        libspdm_get_data(
+            tdisp->device.spdm_context, LIBSPDM_DATA_CONNECTION_STATE,
             &parameter, &connection_state, &size));
     g_assert_cmpuint(
         connection_state, ==, LIBSPDM_CONNECTION_STATE_NEGOTIATED);
@@ -491,18 +545,19 @@ static void tdisp_testdev_authenticate(
     uint8_t cert_chain[SPDM_MAX_SLOT_COUNT][LIBSPDM_MAX_CERT_CHAIN_SIZE];
     size_t cert_chain_size;
 
-    qpci_device_enable(&tdisp->dev);
     assert_libspdm_is_success(
-        libspdm_init_connection(tdisp->spdm_context, false));
+        libspdm_init_connection(tdisp->device.spdm_context, false));
     assert_libspdm_is_success(
-        libspdm_get_digest(tdisp->spdm_context, NULL, &slot_mask, NULL));
+        libspdm_get_digest(
+            tdisp->device.spdm_context, NULL, &slot_mask, NULL));
     g_assert_cmpuint(slot_mask, !=, 0);
 
     for (; slot_id < SPDM_MAX_SLOT_COUNT; ++slot_id) {
         if (slot_mask & (1 << slot_id)) {
             cert_chain_size = sizeof(cert_chain[slot_id]);
             assert_libspdm_is_success(
-                libspdm_get_certificate(tdisp->spdm_context, NULL, slot_id,
+                libspdm_get_certificate(
+                    tdisp->device.spdm_context, NULL, slot_id,
                     &cert_chain_size, cert_chain[slot_id]));
             break;
         }
@@ -513,7 +568,8 @@ static void tdisp_testdev_authenticate(
      * authentication.
      */
     assert_libspdm_is_success(
-        libspdm_challenge(tdisp->spdm_context, NULL, slot_id,
+        libspdm_challenge(
+            tdisp->device.spdm_context, NULL, slot_id,
             SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH, NULL,
             &slot_mask));
 }
@@ -527,43 +583,212 @@ static void tdisp_testdev_secure_session(
     size_t cert_chain_size;
     uint32_t session_id;
 
-    qpci_device_enable(&tdisp->dev);
     assert_libspdm_is_success(
-        libspdm_init_connection(tdisp->spdm_context, false));
+        libspdm_init_connection(tdisp->device.spdm_context, false));
     assert_libspdm_is_success(
-        libspdm_get_digest(tdisp->spdm_context, NULL, &slot_mask, NULL));
+        libspdm_get_digest(
+            tdisp->device.spdm_context, NULL, &slot_mask, NULL));
     g_assert_cmpuint(slot_mask, !=, 0);
 
     for (; slot_id < SPDM_MAX_SLOT_COUNT; ++slot_id) {
         if (slot_mask & (1 << slot_id)) {
             cert_chain_size = sizeof(cert_chain[slot_id]);
             assert_libspdm_is_success(
-                libspdm_get_certificate(tdisp->spdm_context, NULL, slot_id,
+                libspdm_get_certificate(
+                    tdisp->device.spdm_context, NULL, slot_id,
                     &cert_chain_size, cert_chain[slot_id]));
             break;
         }
     }
 
     assert_libspdm_is_success(
-        libspdm_start_session(tdisp->spdm_context, false, NULL, 0,
-         SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH, slot_id, 0,
-         &session_id, NULL, NULL));
+        libspdm_start_session(
+            tdisp->device.spdm_context, false, NULL, 0,
+            SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH, slot_id, 0,
+            &session_id, NULL, NULL));
     assert_libspdm_is_success(
-        libspdm_stop_session(tdisp->spdm_context, session_id, 0));
+        libspdm_stop_session(tdisp->device.spdm_context, session_id, 0));
+}
+
+static void tdisp_testdev_spdm_init_session(QPCIResponder *responder)
+{
+    uint8_t slot_mask, slot_id = 0;
+    uint8_t cert_chain[LIBSPDM_MAX_CERT_CHAIN_SIZE] = { 0 };
+    size_t cert_chain_size = sizeof(cert_chain);
+
+    assert_libspdm_is_success(
+        libspdm_init_connection(responder->spdm_context, false));
+    assert_libspdm_is_success(
+        libspdm_get_digest(responder->spdm_context, NULL, &slot_mask, NULL));
+
+    for (; slot_id < SPDM_MAX_SLOT_COUNT; ++slot_id) {
+        if (slot_mask & (1 << slot_id)) {
+            break;
+        }
+    }
+
+    g_assert_cmpuint(slot_id, !=, SPDM_MAX_SLOT_COUNT);
+
+    assert_libspdm_is_success(
+        libspdm_get_certificate(
+            responder->spdm_context, NULL, slot_id, &cert_chain_size,
+            cert_chain));
+    assert_libspdm_is_success(
+        libspdm_start_session(
+            responder->spdm_context, false, NULL, 0,
+            SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH, slot_id, 0,
+            &responder->session_id, NULL, NULL));
+}
+
+static void tdisp_testdev_spdm_fini_session(QPCIResponder *responder)
+{
+    assert_libspdm_is_success(
+        libspdm_stop_session(
+            responder->spdm_context, responder->session_id, 0));
+}
+
+static void tdisp_testdev_ide_km_query(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_ide_km_query_t *query;
+    pci_ide_km_query_resp_t *query_resp;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_ide_km_query_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) + sizeof(pci_ide_km_query_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_IDE_KM;
+    query = (pci_ide_km_query_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    query->header.object_id = PCI_IDE_KM_OBJECT_ID_QUERY;
+    query->port_index = 0;
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(response->pci_doe_vendor_header.payload_length, !=, 0);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_IDE_KM);
+
+    query_resp = (pci_ide_km_query_resp_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        query_resp->header.object_id, ==, PCI_IDE_KM_OBJECT_ID_QUERY_RESP);
+    g_assert_cmpuint(query_resp->port_index, ==, 0);
+    g_assert_cmpuint(query_resp->dev_func_num, ==, devfn);
+    g_assert_cmpuint(query_resp->bus_num, ==, busnr);
+    g_assert_cmpuint(query_resp->segment, ==, 0);
+    g_assert_cmpuint(query_resp->max_port_index, ==, 0);
+
+    g_free(request);
+    g_free(response);
+}
+
+/*
+ * static void tdisp_testdev_ide_km_key_prog(
+ *     void *spdm_context, uint32_t session_id, uint8_t port_index)
+ * {
+ *
+ * }
+ *
+ * static void tdisp_testdev_ide_km_k_set_go(
+ *     void *spdm_context, uint32_t session_id, uint8_t port_index,
+ *     uint8_t stream_id, uint8_t key_set, uint8_t rxtxb, uint8_t sub_stream)
+ * {
+ *
+ * }
+ *
+ * static void tdisp_testdev_ide_km_k_set_stop(
+ *     void *spdm_context, uint32_t session_id)
+ * {
+ *
+ * }
+ */
+
+static void tdisp_testdev_ide_km(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QTDISPTestDev *tdisp = obj;
+
+    tdisp_testdev_spdm_init_session(&tdisp->device);
+    tdisp_testdev_spdm_init_session(&tdisp->root_port);
+
+    /*
+     * Secured application phase.
+     */
+    tdisp_testdev_ide_km_query(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0));
+    tdisp_testdev_ide_km_query(
+        tdisp->root_port.spdm_context, tdisp->root_port.session_id, 0,
+        QPCI_DEVFN(4, 0));
+
+    tdisp_testdev_spdm_fini_session(&tdisp->root_port);
+    tdisp_testdev_spdm_fini_session(&tdisp->device);
 }
 
 static void tdisp_testdev_register_driver(void)
 {
     QOSGraphEdgeOptions opts = {
-        .before_cmd_line = "-device pcie-root-port,id=pcie.1",
-        .extra_device_opts = "bus=pcie.1,addr=00.0,spdm-responder=spdm.0",
-        .after_cmd_line = "-object spdm-responder-libspdm,id=spdm.0,"
-            "certs=tests/data/tdisp/rsa3072/device.certchain.der,"
-            "keys=tests/data/tdisp/rsa3072/device.key,"
-            "certs=tests/data/tdisp/ecp256/device.certchain.der,"
-            "keys=tests/data/tdisp/ecp256/device.key,"
-            "certs=tests/data/tdisp/ecp384/device.certchain.der,"
-            "keys=tests/data/tdisp/ecp384/device.key",
+        .before_cmd_line =
+            /* SPDM Responder for PCIe Root Port */
+            "-object spdm-responder-libspdm,id=spdm.0,"
+                "certs=tests/data/tdisp/rsa3072/root-port.certchain.der,"
+                "keys=tests/data/tdisp/rsa3072/root-port.key,"
+                "certs=tests/data/tdisp/ecp256/root-port.certchain.der,"
+                "keys=tests/data/tdisp/ecp256/root-port.key,"
+                "certs=tests/data/tdisp/ecp384/root-port.certchain.der,"
+                "keys=tests/data/tdisp/ecp384/root-port.key "
+            "-device pcie-root-port,addr=04.0,id=pcie.1,"
+                "x-spdm-responder=spdm.0,x-pcie-idecap-init=on "
+
+            /* SPDM Responder for TDISP Test Device*/
+            "-object spdm-responder-libspdm,id=spdm.1,"
+                "certs=tests/data/tdisp/rsa3072/device.certchain.der,"
+                "keys=tests/data/tdisp/rsa3072/device.key,"
+                "certs=tests/data/tdisp/ecp256/device.certchain.der,"
+                "keys=tests/data/tdisp/ecp256/device.key,"
+                "certs=tests/data/tdisp/ecp384/device.certchain.der,"
+                "keys=tests/data/tdisp/ecp384/device.key",
+        .extra_device_opts = "bus=pcie.1,addr=00.0,spdm-responder=spdm.1",
     };
     QPCIAddress addr = {
         .devfn = QPCI_DEVFN(0 , 0),
@@ -584,6 +809,7 @@ static void tdisp_testdev_register_tests(void)
         "authenticate", "tdisp-testdev", tdisp_testdev_authenticate, NULL);
     qos_add_test(
         "secure-session", "tdisp-testdev", tdisp_testdev_secure_session, NULL);
+    qos_add_test("ide-km", "tdisp-testdev", tdisp_testdev_ide_km, NULL);
 }
 
 libqos_init(tdisp_testdev_register_driver);

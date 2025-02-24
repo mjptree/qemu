@@ -1,13 +1,15 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
-#include "qapi/qmp/qlist.h"
 #include "hw/qdev-core.h"
 #include "hw/spdm/spdm-responder-libspdm.h"
 
 #ifndef LIBSPDM_HAL_PASS_SPDM_CONTEXT
 #define LIBSPDM_HAL_PASS_SPDM_CONTEXT 1
 #endif
+
+#undef SPDM_STANDARD_ID_PCISIG
+#undef SPDM_VENDOR_ID_PCISIG
 
 /*< libspdm >*/
 #include "industry_standard/spdm.h"
@@ -89,7 +91,7 @@ static SPDMResponderLibspdm *spdm_responder_libspdm_get_from_context(
     status = libspdm_get_data(spdm_context, LIBSPDM_DATA_APP_CONTEXT_DATA,
                               &parameter, &responder, &data_size);
     assert(LIBSPDM_STATUS_IS_SUCCESS(status));
-    return SPDM_RESPONDER_LIBSDPM(responder);
+    return SPDM_RESPONDER_LIBSPDM(responder);
 }
 
 bool libspdm_requester_data_sign(
@@ -379,6 +381,7 @@ static libspdm_return_t spdm_responder_libspdm_acquire_receiver_buffer(
 static void spdm_responder_libspdm_release_buffer(void *spdm_context,
     const void *msg_buf_ptr)
 {
+    /* Nothing to do. */
 }
 
 static libspdm_return_t spdm_responder_libspdm_get_response(
@@ -387,16 +390,109 @@ static libspdm_return_t spdm_responder_libspdm_get_response(
     void *response)
 {
     SPDMResponderLibspdm *responder;
+    libspdm_data_parameter_t parameter = {
+        .location = LIBSPDM_DATA_LOCATION_LOCAL,
+    };
+    libspdm_return_t status;
+    libspdm_response_state_t response_state;
+    libspdm_connection_state_t connection_state;
+    void *secured_context;
+    size_t size;
 
-    if (is_app_message) {
+    if (!response || !response_size || *response_size < sizeof(SPDMHeader)) {
+        return LIBSPDM_STATUS_INVALID_PARAMETER;
+    }
+
+    if (!is_app_message) {
+        if (request_size < sizeof(SPDMHeader)) {
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+                response_size, response);
+        }
+
         responder = spdm_responder_libspdm_get_from_context(spdm_context);
+
+        size = sizeof(response_state);
+        status = libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_RESPONSE_STATE, &parameter,
+            &response_state, &size);
+        assert(LIBSPDM_STATUS_IS_SUCCESS(status));
+
+        switch (response_state) {
+        case LIBSPDM_RESPONSE_STATE_NORMAL:
+            /* Proceed */
+            break;
+        case LIBSPDM_RESPONSE_STATE_BUSY:
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_BUSY, 0, response_size,
+                response);
+        case LIBSPDM_RESPONSE_STATE_NOT_READY:
+            /*
+             * This would require using internal libspdm APIs. However, no
+             * libspdm API function at the moment (v3.6.0) can enter this
+             * response state itself, only the application can.
+             */
+            return LIBSPDM_STATUS_UNSUPPORTED_CAP;
+        case LIBSPDM_RESPONSE_STATE_NEED_RESYNC:
+            /*
+             * Technically, at the moment (v3.6.0) this operation cannot fail.
+             */
+            status = libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_REQUEST_RESYNCH, 0,
+                response_size, response);
+
+            if (!LIBSPDM_STATUS_IS_ERROR(status)) {
+                connection_state = LIBSPDM_CONNECTION_STATE_NOT_STARTED;
+                parameter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+                assert(LIBSPDM_STATUS_IS_SUCCESS(
+                    libspdm_set_data(
+                        spdm_context, LIBSPDM_DATA_CONNECTION_STATE,
+                        &parameter, &connection_state,
+                        sizeof(connection_state))));
+            }
+
+            return status;
+        case LIBSPDM_RESPONSE_STATE_PROCESSING_ENCAP:
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_REQUEST_IN_FLIGHT, 0,
+                response_size, response);
+        default:
+            /* Can choose a sensible response code here. */
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_UNEXPECTED_REQUEST, 0,
+                response_size, response);
+        }
+
+        if (!session_id) {
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_SESSION_REQUIRED, 0,
+                response_size, response);
+        }
+
+        secured_context = libspdm_get_secured_message_context_via_session_id(
+            spdm_context, *session_id);
+
+        if (!secured_context ||
+            libspdm_secured_message_get_session_state(secured_context) !=
+                LIBSPDM_SESSION_STATE_ESTABLISHED) {
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_SESSION_REQUIRED, 0,
+                response_size, response);
+        }
+
         assert(responder->get_response);
-        responder->get_response(responder->dev, session_id, request_size,
-            request, response_size, response);
-        return LIBSPDM_STATUS_UNSUPPORTED_CAP;
+
+        if (!responder->get_response(responder->dev, session_id, request_size,
+                                     request, response_size, response)) {
+            return libspdm_generate_error_response(
+                spdm_context, SPDM_ERROR_CODE_OPERATION_FAILED, 0,
+                response_size, response);
+        }
     } else {
         return LIBSPDM_STATUS_UNSUPPORTED_CAP;
     }
+
+    return LIBSPDM_STATUS_SUCCESS;
 }
 
 static bool spdm_responder_libspdm_load_cert_chains(
@@ -628,7 +724,7 @@ static void spdm_responder_libspdm_connection_state_callback(
 
 static void spdm_responder_libspdm_complete(UserCreatable *obj, Error **errp)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     libspdm_data_parameter_t parameter = {
         .location = LIBSPDM_DATA_LOCATION_LOCAL,
     };
@@ -777,7 +873,7 @@ static bool spdm_responder_libspdm_device_init(
     SPDMResponderReceiveMessageFunc receive_message,
     SPDMResponderGetResponseFunc get_response, Error **errp)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
 
     if (responder->dev) {
         error_setg(errp, "Cannot bind %s to more than one device",
@@ -795,7 +891,7 @@ static bool spdm_responder_libspdm_device_init(
 static bool spdm_responder_libspdm_dispatch_message(
     SPDMResponder *obj, Error **errp)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     libspdm_return_t status =
         libspdm_responder_dispatch_message(responder->spdm_context);
 
@@ -809,21 +905,37 @@ static bool spdm_responder_libspdm_dispatch_message(
     return true;
 }
 
+static uint8_t spdm_responder_libspdm_get_connection_version(
+    SPDMResponder *obj)
+{
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
+    libspdm_return_t status;
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    status = libspdm_get_data(
+        responder->spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter,
+        &version, &version_size);
+    assert(LIBSPDM_STATUS_IS_SUCCESS(status));
+    return version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+}
+
 OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(
-    SPDMResponderLibspdm, spdm_responder_libspdm, SPDM_RESPONDER_LIBSDPM,
+    SPDMResponderLibspdm, spdm_responder_libspdm, SPDM_RESPONDER_LIBSPDM,
     SPDM_RESPONDER, { TYPE_USER_CREATABLE }, { })
 
 static void spdm_responder_libspdm_get_max_spdm_msg_size(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     visit_type_uint32(v, name, &responder->max_spdm_msg_size, errp);
 }
 
 static void spdm_responder_libspdm_set_max_spdm_msg_size(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     uint32_t max_spdm_msg_size;
 
     if (responder->spdm_context) {
@@ -842,7 +954,7 @@ static void spdm_responder_libspdm_set_max_spdm_msg_size(
 static void spdm_responder_libspdm_get_data_transfer_size(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     visit_type_uint32(v, name, &responder->data_transfer_size, errp);
 }
 
@@ -850,7 +962,7 @@ static void spdm_responder_libspdm_set_data_transfer_size(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
     ERRP_GUARD();
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     uint32_t data_transfer_size;
 
     if (responder->spdm_context) {
@@ -880,7 +992,7 @@ static void spdm_responder_libspdm_get_certs(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
     ERRP_GUARD();
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     GenericList *list, *next = NULL, elem = { .next = NULL };
     size_t slot_id, slots_used = 0, size = sizeof(*list);
 
@@ -920,7 +1032,7 @@ static void spdm_responder_libspdm_set_certs(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
     ERRP_GUARD();
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     GenericList *list, *next, *elem;
     size_t slot_id = 0, size = sizeof(*list);
 
@@ -960,7 +1072,7 @@ static void spdm_responder_libspdm_get_keys(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
     ERRP_GUARD();
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     GenericList *list, *next = NULL, elem = { .next = NULL };
     size_t slot_id, slots_used = 0, size = sizeof(*list);
 
@@ -1000,7 +1112,7 @@ static void spdm_responder_libspdm_set_keys(
     Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
 {
     ERRP_GUARD();
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     GenericList *list, *next, *elem;
     size_t slot_id = 0, size = sizeof(*list);
 
@@ -1038,7 +1150,7 @@ static void spdm_responder_libspdm_set_keys(
 
 static void spdm_responder_libspdm_init(Object *obj)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
 
     responder->capabilities = SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_CERT_CAP |
         SPDM_GET_CAPABILITIES_RESPONSE_FLAGS_CHAL_CAP |
@@ -1076,7 +1188,7 @@ static void spdm_responder_libspdm_init(Object *obj)
 
 static void spdm_responder_libspdm_finalize(Object *obj)
 {
-    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSDPM(obj);
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
     Slot *slot;
     size_t slot_id = 0;
 
@@ -1110,6 +1222,8 @@ static void spdm_responder_libspdm_class_init(ObjectClass *klass, void *data)
     ucc->can_be_deleted = spdm_responder_libspdm_can_be_deleted;
     src->device_init = spdm_responder_libspdm_device_init;
     src->dispatch_message = spdm_responder_libspdm_dispatch_message;
+    src->get_connection_version =
+        spdm_responder_libspdm_get_connection_version;
 
     property = object_class_property_add(klass, DATA_TRANSFER_SIZE_PROP,
         "uint32", spdm_responder_libspdm_get_data_transfer_size,

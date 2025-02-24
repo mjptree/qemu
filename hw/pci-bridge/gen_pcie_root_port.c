@@ -13,7 +13,10 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "hw/spdm/spdm-responder.h"
 #include "hw/pci/msix.h"
+#include "hw/pci/pcie_doe.h"
+#include "hw/pci/pcie_ide.h"
 #include "hw/pci/pcie_port.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
@@ -26,6 +29,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(GenPCIERootPort, GEN_PCIE_ROOT_PORT)
 #define GEN_PCIE_ROOT_PORT_AER_OFFSET           0x100
 #define GEN_PCIE_ROOT_PORT_ACS_OFFSET \
         (GEN_PCIE_ROOT_PORT_AER_OFFSET + PCI_ERR_SIZEOF)
+#define GEN_PCIE_ROOT_PORT_DOE_OFFSET \
+        (GEN_PCIE_ROOT_PORT_ACS_OFFSET + PCI_ACS_SIZEOF)
+#define GEN_PCIE_ROOT_PORT_IDE_OFFSET \
+        (GEN_PCIE_ROOT_PORT_DOE_OFFSET + PCI_DOE_SIZEOF)
 
 #define GEN_PCIE_ROOT_PORT_MSIX_NR_VECTOR       1
 #define GEN_PCIE_ROOT_DEFAULT_IO_RANGE          4096
@@ -39,6 +46,9 @@ struct GenPCIERootPort {
 
     /* additional resources to reserve */
     PCIResReserve res_reserve;
+
+    /* CMA/SPDM */
+    SPDMResponder *spdm_responder;
 };
 
 static uint8_t gen_rp_aer_vector(const PCIDevice *d)
@@ -73,17 +83,149 @@ static bool gen_rp_test_migrate_msix(void *opaque, int version_id)
     return rp->migrate_msix;
 }
 
+static uint32_t gen_rp_config_read(PCIDevice *pdev, uint32_t addr, int len)
+{
+    uint32_t data = 0;
+    if (pcie_doe_read_config(&pdev->doe_spdm, addr, len, &data)) {
+        return data;
+    }
+
+    return pci_default_read_config(pdev, addr, len);
+}
+
+static void gen_rp_config_write(
+    PCIDevice *pdev, uint32_t addr, uint32_t data, int len)
+{
+    pcie_doe_write_config(&pdev->doe_spdm, addr, data, len);
+    pci_default_write_config(pdev, addr, data, len);
+}
+
+static bool gen_rp_send_message(DeviceState *dev, size_t message_size,
+                                const void *message)
+{
+    PCIDevice *pdev = PCI_DEVICE(dev);
+    return pcie_doe_send_message(&pdev->doe_spdm, message_size, message);
+}
+
+static bool gen_rp_receive_message(DeviceState *dev, size_t *message_size,
+                                   void **message)
+{
+    PCIDevice *pdev = PCI_DEVICE(dev);
+    return pcie_doe_receive_message(&pdev->doe_spdm, message_size, message);
+}
+
+static bool gen_rp_get_response(DeviceState *dev, const uint32_t *session_id,
+                                size_t request_size, const SPDMHeader *request,
+                                size_t *response_size, SPDMHeader *response)
+{
+    PCIDevice *pdev = PCI_DEVICE(dev);
+    GenPCIERootPort *grp = GEN_PCIE_ROOT_PORT(dev);
+    SPDMPCIDefined *request_header, *response_header;
+    PCIPayload *request_payload, *response_payload;
+    size_t request_payload_size, response_payload_size;
+    SPDMErrorCode error_code;
+    bool success;
+
+    assert(session_id && response && response_size);
+
+    if (request_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
+        return false;
+    }
+
+    if (*response_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
+        return false;
+    }
+
+    request_header = (SPDMPCIDefined *)request;
+    response_header = (SPDMPCIDefined *)response;
+
+    if (request_header->vendor_defined.header.request_response_code !=
+        SPDM_REQUEST_CODE_VENDOR_DEFINED_REQUEST)
+    {
+        return false;
+    }
+
+    if (request_header->vendor_defined.standard_id !=
+        SPDM_STANDARD_ID_PCISIG) {
+        return false;
+    }
+
+    if (request_header->vendor_defined.len !=
+        sizeof(request_header->vendor_id) ||
+        request_header->vendor_id != SPDM_VENDOR_ID_PCISIG) {
+        return false;
+    }
+
+    if (request_size < sizeof(SPDMPCIDefined) + request_header->req_length) {
+        return false;
+    }
+
+    request_payload = (PCIPayload *)
+        ((uint8_t *)request + sizeof(SPDMPCIDefined));
+    request_payload_size = request_header->req_length;
+    response_payload = (PCIPayload *)
+        ((uint8_t *)response + sizeof(SPDMPCIDefined));
+    response_payload_size = *response_size - sizeof(SPDMPCIDefined);
+
+    switch (request_payload->protocol_id) {
+    case PCI_SPDM_PROTOCOL_ID_IDE_KM:
+        success = pcie_ide_km_get_response(
+            pdev, *session_id, request_payload, request_payload_size,
+            response_payload, &response_payload_size, &error_code);
+        break;
+    case PCI_SPDM_PROTOCOL_ID_TDISP:
+        success = false;
+        break;
+    default:
+        success = false;
+        break;
+    };
+
+    if (UINT16_MAX < response_payload_size) {
+        return false;
+    }
+
+    response_header->vendor_defined.header.spdm_version =
+        spdm_responder_get_connection_version(grp->spdm_responder);
+    response_header->vendor_defined.header.request_response_code =
+        SPDM_RESPONSE_CODE_VENDOR_DEFINED_RESPONSE;
+    response_header->vendor_defined.standard_id = SPDM_STANDARD_ID_PCISIG;
+    response_header->vendor_defined.len = sizeof(response_header->vendor_id);
+    response_header->vendor_id = SPDM_VENDOR_ID_PCISIG;
+    response_header->req_length = response_payload_size;
+    return success;
+}
+
+static bool gen_rp_handle_request(DOECap *cap)
+{
+    GenPCIERootPort *d = GEN_PCIE_ROOT_PORT(cap->pdev);
+    Error *local_error;
+
+    if (!spdm_responder_dispatch_message(d->spdm_responder, &local_error)) {
+        error_report_err(local_error);
+        return false;
+    }
+
+    return true;
+}
+
+static DOEProtocol doe_protocols[] = {
+    { PCI_VENDOR_ID_PCI_SIG, PCI_SIG_DOE_CMA, gen_rp_handle_request },
+    { PCI_VENDOR_ID_PCI_SIG, PCI_SIG_DOE_SECURED_CMA, gen_rp_handle_request },
+    { },
+};
+
 static void gen_rp_realize(DeviceState *dev, Error **errp)
 {
+    ERRP_GUARD();
     PCIDevice *d = PCI_DEVICE(dev);
     PCIESlot *s = PCIE_SLOT(d);
     GenPCIERootPort *grp = GEN_PCIE_ROOT_PORT(d);
     PCIERootPortClass *rpc = PCIE_ROOT_PORT_GET_CLASS(d);
-    Error *local_err = NULL;
+    bool ide_km_supported = false;
 
-    rpc->parent_realize(dev, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    rpc->parent_realize(dev, errp);
+    if (*errp) {
         return;
     }
 
@@ -108,6 +250,26 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
                                      PCI_COMMAND_IO);
         d->wmask[PCI_IO_BASE] = 0;
         d->wmask[PCI_IO_LIMIT] = 0;
+    }
+
+    if (grp->spdm_responder) {
+        pcie_doe_init(d, &d->doe_spdm, GEN_PCIE_ROOT_PORT_DOE_OFFSET,
+                      doe_protocols, true, 0);
+
+        if (!device_spdm_responder_init(DEVICE(d), grp->spdm_responder,
+                                        gen_rp_send_message,
+                                        gen_rp_receive_message,
+                                        gen_rp_get_response, errp)) {
+            rpc->parent_class.exit(d);
+            return;
+        }
+
+        ide_km_supported = true;
+    }
+
+    if (d->cap_present & QEMU_PCIE_CAP_IDE) {
+        pcie_ide_init(d, GEN_PCIE_ROOT_PORT_IDE_OFFSET, ide_km_supported, NULL,
+                      0, NULL, 0);
     }
 }
 
@@ -145,6 +307,10 @@ static const Property gen_rp_props[] = {
                                 speed, PCIE_LINK_SPEED_16),
     DEFINE_PROP_PCIE_LINK_WIDTH("x-width", PCIESlot,
                                 width, PCIE_LINK_WIDTH_32),
+    DEFINE_PROP_BIT("x-pcie-idecap-init", PCIDevice, cap_present,
+                    QEMU_PCIE_IDE_BITNR, false),
+    DEFINE_PROP_LINK("x-spdm-responder", GenPCIERootPort, spdm_responder,
+                     TYPE_SPDM_RESPONDER, SPDMResponder *),
 };
 
 static void gen_rp_dev_class_init(ObjectClass *klass, void *data)
@@ -153,6 +319,8 @@ static void gen_rp_dev_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     PCIERootPortClass *rpc = PCIE_ROOT_PORT_CLASS(klass);
 
+    k->config_write = gen_rp_config_write;
+    k->config_read = gen_rp_config_read;
     k->vendor_id = PCI_VENDOR_ID_REDHAT;
     k->device_id = PCI_DEVICE_ID_REDHAT_PCIE_RP;
     dc->desc = "PCI Express Root Port";
