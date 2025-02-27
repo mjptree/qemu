@@ -97,7 +97,7 @@ typedef struct IDEKMQueryResp {
     uint8_t max_port_index;
 } IDEKMQueryResp;
 
-/* Size of KeyProg IV */
+/* Size of KeyProg IV (portion provided by requester) */
 #define PCI_IDE_KM_KEY_PROG_IV_SIZE     8
 
 /* Size of AES-GCM256 Key */
@@ -106,11 +106,14 @@ typedef struct IDEKMQueryResp {
 #define ide_km_key_set(attr)    extract8(attr, 0, 1)
 #define ide_km_rxtxb(attr)      extract8(attr, 1, 1)
 /*
- * In IDE ECN Rev A (PCIe Base Rev 5.0) the sub stream field can be 4 bit long.
+ * In IDE ECN Rev A (PCIe Base Rev 5) the sub stream field can be 4 bit long.
  * This has been limited to 3 bits in TDISP ECN (PCIe Base Rev 5.0/6.0).
  */
 #define ide_km_sub_stream(attr, tee_io_supported) \
     extract8(attr, 4, tee_io_supported ? 3 : 4)
+
+#define ide_km_attributes(key_set, rxtxb, sub_stream) \
+    ((0x01 & key_set) | ((0x01 & rxtxb) << 1) | ((0x0f & sub_stream) << 4))
 
 typedef struct IDEKMKeyProg {
     IDEKMMessage common;
@@ -364,6 +367,9 @@ struct SPDMResponderClass {
         SPDMResponderGetResponseFunc get_response, Error **errp);
     bool (*dispatch_message)(SPDMResponder *responder, Error **errp);
     uint8_t (*get_connection_version)(SPDMResponder *responder);
+    bool (*get_response_error)(
+        SPDMResponder *responder, uint8_t error_code, uint8_t error_data,
+        size_t *response_size, SPDMHeader *response);
 };
 
 struct SPDMResponder {
@@ -379,5 +385,8 @@ bool device_spdm_responder_init(
     SPDMResponderGetResponseFunc get_response, Error **errp);
 bool spdm_responder_dispatch_message(SPDMResponder *responder, Error **errp);
 uint8_t spdm_responder_get_connection_version(SPDMResponder *responder);
+bool spdm_responder_get_response_error(
+    SPDMResponder *responder, uint8_t error_code, uint8_t error_data,
+    size_t *response_size, SPDMHeader *response);
 
 #endif /* HW_SPDM_SPDM_RESPONDER_H */

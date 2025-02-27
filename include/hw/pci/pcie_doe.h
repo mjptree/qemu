@@ -129,6 +129,7 @@ static inline uint32_t pcie_doe_data_object_length_in_bytes(DOEHeader *header)
     return dwords * sizeof(uint32_t);
 }
 
+bool pcie_doe_present(PCIDevice *pdev);
 void pcie_doe_init(PCIDevice *pdev, DOECap *doe_cap, uint16_t offset,
                    DOEProtocol *protocols, bool intr, uint16_t vec);
 void pcie_doe_fini(DOECap *doe_cap);

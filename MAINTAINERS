@@ -2047,6 +2047,8 @@ S: Maintained
 F: hw/misc/tdisp-testdev.c
 F: tests/qtest/tdisp-test.c
 F: tests/data/tdisp/
+F: include/hw/pci/pcie_tdisp.h
+F: hw/pci/pcie_tdisp.c
 
 ACPI/SMBIOS
 M: Michael S. Tsirkin <mst@redhat.com>

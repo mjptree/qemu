@@ -109,6 +109,11 @@ static void pcie_doe_reset_mbox(DOECap *st)
     st->write_data_bytes_in_flight = 0;
 }
 
+bool pcie_doe_present(PCIDevice *dev)
+{
+    return dev->doe_spdm.offset;
+}
+
 void pcie_doe_init(PCIDevice *dev, DOECap *doe_cap, uint16_t offset,
                    DOEProtocol *protocols, bool intr, uint16_t vec)
 {
@@ -143,6 +148,10 @@ void pcie_doe_init(PCIDevice *dev, DOECap *doe_cap, uint16_t offset,
 
 void pcie_doe_fini(DOECap *doe_cap)
 {
+    if (!doe_cap->pdev || pcie_doe_present(doe_cap->pdev)) {
+        return;
+    }
+
     g_queue_free_full(doe_cap->read_data_mailbox, pcie_doe_data_object_free);
     g_queue_free_full(doe_cap->write_data_mailbox, pcie_doe_data_object_free);
     g_free(doe_cap);
@@ -243,7 +252,8 @@ static void pcie_doe_prepare_rsp(DOECap *doe_cap)
     if (success) {
         pcie_doe_irq_assert(doe_cap);
     } else {
-        pcie_doe_reset_mbox(doe_cap);
+        /* Only signal error. Host has to set DOE Abort bit to recover. */
+        pcie_doe_set_error(doe_cap, true);
     }
 }
 
@@ -320,7 +330,7 @@ void pcie_doe_write_config(DOECap *doe_cap,
     switch (addr) {
     case PCI_EXP_DOE_CTRL:
         if (FIELD_EX32(val, PCI_DOE_CAP_CONTROL, DOE_ABORT)) {
-            pcie_doe_set_error(doe_cap, 0);
+            pcie_doe_set_error(doe_cap, false);
             pcie_doe_reset_mbox(doe_cap);
             return;
         }
@@ -343,7 +353,7 @@ void pcie_doe_write_config(DOECap *doe_cap,
         break;
     case PCI_EXP_DOE_RD_DATA_MBOX:
         /* Mailbox should be DW accessed */
-        if (size != DWORD_BYTE) {
+        if (doe_cap->status.error || size != DWORD_BYTE) {
             return;
         }
 
@@ -351,7 +361,7 @@ void pcie_doe_write_config(DOECap *doe_cap,
         break;
     case PCI_EXP_DOE_WR_DATA_MBOX:
         /* Mailbox should be DW accessed */
-        if (size != DWORD_BYTE) {
+        if (doe_cap->status.error || size != DWORD_BYTE) {
             return;
         }
 

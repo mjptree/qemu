@@ -28,15 +28,6 @@ typedef enum IDESelAlgo {
     IDE_SEL_ALGO_MASK       = 0b11111,
 } IDESelAlgo;
 
-typedef enum IDESubStreamID {
-    IDE_SUB_STREAM_ID_PR   = 0b000,
-    IDE_SUB_STREAM_ID_NPR  = 0b001,
-    IDE_SUB_STREAM_ID_C    = 0b010,
-    IDE_SUB_STREAM_ID_MASK = 0b111,
-} IDESubStreamID;
-
-#define IDE_SUB_STREAM_MAX_COUNT 3
-
 /* IDE Capabilites Register */
 #define PCI_EXP_IDE_CAP     0x04
 REG32(PCI_IDE_CAP_REG, PCI_EXP_IDE_CAP)
@@ -127,14 +118,22 @@ REG32(PCI_IDE_ADDR_ASSOC_2_REG, PCI_EXP_IDE_ADDR_ASSOC_2)
 REG32(PCI_IDE_ADDR_ASSOC_3_REG, PCI_EXP_IDE_ADDR_ASSOC_3)
     FIELD(PCI_IDE_ADDR_ASSOC_3_REG, MEM_BASE_UP, 0, 32)
 
-#define IDE_KEY_SET_MAX_COUNT 2
+#define IDE_KEY_SET_MAX_COUNT    2
+#define IDE_SUB_STREAM_MAX_COUNT 3
+#define IDE_RXTXB_MAX_COUNT      2
 
 typedef struct IDESubStream {
+    bool rx_started;
     GByteArray *rx_key;
+    GByteArray *rx_iv;
+
+    bool tx_started;
+    GByteArray *tx_key;
+    GByteArray *tx_iv;
 } IDESubStream;
 
 typedef struct IDEKeySet {
-    IDESubStream sub_stream[IDE_SUB_STREAM_MAX_COUNT];
+    IDESubStream sub_streams[IDE_SUB_STREAM_MAX_COUNT];
 } IDEKeySet;
 
 typedef struct IDEStream {
@@ -144,10 +143,10 @@ typedef struct IDEStream {
     /* Traffic class */
     uint8_t tc;
 
-    /* Received K_SET_START message */
-    bool started;
+    IDEKeySet key_sets[IDE_KEY_SET_MAX_COUNT];
 
-    IDEKeySet key_set[IDE_KEY_SET_MAX_COUNT];
+    /* Active Key Set */
+    uint8_t active_key_set;
 } IDEStream;
 
 typedef struct LinkIDEStream {
@@ -198,10 +197,16 @@ typedef struct IDECap {
 } IDECap;
 
 bool pcie_ide_present(PCIDevice *dev);
+void pcie_link_ide_transition_to_insecure(
+    PCIDevice *dev, LinkIDEStream *stream);
+void pcie_sel_ide_transition_to_insecure(
+    PCIDevice *dev, SelectiveIDEStream *stream);
+void pcie_ide_transition_all_to_insecure(PCIDevice *dev);
 void pcie_ide_init(
     PCIDevice *dev, uint16_t offset, bool ide_km_supported,
     LinkIDEStream *link_ide_streams, uint8_t link_ide_streams_num,
     SelectiveIDEStream *sel_ide_streams, uint8_t sel_ide_streams_num);
+void pcie_ide_fini(PCIDevice *dev);
 
 void pcie_ide_config_write(
     PCIDevice *dev, uint32_t addr, uint32_t val, int size);

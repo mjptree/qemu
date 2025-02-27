@@ -31,6 +31,16 @@ uint8_t spdm_responder_get_connection_version(SPDMResponder *responder)
     return class->get_connection_version(responder);
 }
 
+bool spdm_responder_get_response_error(
+    SPDMResponder *responder, uint8_t error_code, uint8_t error_data,
+    size_t *response_size, SPDMHeader *response)
+{
+    SPDMResponderClass *class = SPDM_RESPONDER_GET_CLASS(responder);
+    assert(class->get_response_error);
+    return class->get_response_error(
+        responder, error_code, error_data, response_size, response);
+}
+
 static void spdm_responder_init(Object *obj)
 {
 }

@@ -2,14 +2,16 @@
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pcie.h"
 #include "hw/pci/pcie_ide.h"
+#include "hw/pci/pcie_tdisp.h"
 
-/*
- * static bool pcie_tee_io_supported(PCIDevice *dev)
- * {
- *     return pci_get_long(dev->config + dev->exp.exp_cap + PCI_EXP_DEVCAP) &
- *         PCI_EXP_DEVCAP_TEE_IO;
- * }
- */
+typedef enum IDEKMKpAckStatus {
+    IDE_KM_KP_ACK_STATUS_SUCCESS                = 0x00,
+    IDE_KM_KP_ACK_STATUS_INCORRECT_LENGTH       = 0x01,
+    IDE_KM_KP_ACK_STATUS_UNSUPPORTED_PORT_INDEX = 0x02,
+    IDE_KM_KP_ACK_STATUS_UNSUPPORTED_FIELD      = 0x03,
+    IDE_KM_KP_ACK_STATUS_UNSPECIFIED            = 0x04,
+    IDE_KM_KP_ACK_STATUS_MASK                   = 0xff,
+} IDEKMKpAckStatus;
 
 static bool pcie_link_ide_enabled(PCIDevice *dev, LinkIDEStream *stream)
 {
@@ -227,6 +229,37 @@ bool pcie_ide_present(PCIDevice *dev)
     return dev->ide_cap.offset;
 }
 
+void pcie_link_ide_transition_to_insecure(
+    PCIDevice *dev, LinkIDEStream *stream)
+{
+    pcie_link_ide_config_write_state(dev, stream, IDE_STREAM_STATE_INSECURE);
+}
+
+void pcie_sel_ide_transition_to_insecure(
+    PCIDevice *dev, SelectiveIDEStream *stream)
+{
+    pcie_sel_ide_config_write_state(dev, stream, IDE_STREAM_STATE_INSECURE);
+}
+
+void pcie_ide_transition_all_to_insecure(PCIDevice *dev)
+{
+    uint8_t link_ide_streams_num = dev->ide_cap.link_ide_streams_num;
+    uint8_t sel_ide_streams_num = dev->ide_cap.sel_ide_streams_num;
+    uint8_t stream_id;
+    LinkIDEStream *link_ide_stream;
+    SelectiveIDEStream *sel_ide_stream;
+
+    for (stream_id = 0; stream_id < link_ide_streams_num; ++stream_id) {
+        link_ide_stream = &dev->ide_cap.link_ide_streams[stream_id];
+        pcie_link_ide_transition_to_insecure(dev, link_ide_stream);
+    }
+
+    for (stream_id = 0; stream_id < sel_ide_streams_num; ++stream_id) {
+        sel_ide_stream = &dev->ide_cap.sel_ide_streams[stream_id];
+        pcie_sel_ide_transition_to_insecure(dev, sel_ide_stream);
+    }
+}
+
 static IDEStream *pcie_ide_stream_find_by_stream_id(
     PCIDevice *dev, uint8_t stream_id)
 {
@@ -268,24 +301,15 @@ static bool pcie_ide_is_tc_supported(PCIDevice *dev, uint8_t tc)
     return FIELD_EX32(reg, PCI_IDE_CAP_REG, NUM_LNK_IDE_STREAMS_SUPP) >= tc;
 }
 
-/*
- * static bool pcie_ide_flow_thru_enabled(PCIDevice *dev)
- * {
- *     uint8_t *ide_ctrl = dev->config + dev->ide_cap.offset + PCI_EXP_IDE_CTRL;
- *     uint32_t reg = pci_get_long(ide_ctrl);
- *     return FIELD_EX32(reg, PCI_IDE_CTRL_REG, FLOW_THRU_EN);
- * }
- *
- * static size_t pcie_ide_km_get_key_size(IDESelAlgo sel_algo)
- * {
- *     switch (sel_algo) {
- *     case IDE_SEL_ALGO_AES_GCM256:
- *         return PCI_IDE_KM_AES_GCM256_KEY_SIZE;
- *     default:
- *         return 0;
- *     }
- * }
- */
+static size_t pcie_ide_km_get_key_size(IDESelAlgo sel_algo)
+{
+    switch (sel_algo) {
+    case IDE_SEL_ALGO_AES_GCM256:
+        return PCI_IDE_KM_AES_GCM256_KEY_SIZE;
+    default:
+        return 0;
+    }
+}
 
 static void pcie_link_ide_reg_blk_write(
     PCIDevice *dev, LinkIDEStream *link_ide_stream, uint32_t addr, int size,
@@ -341,8 +365,7 @@ static void pcie_link_ide_reg_blk_write(
                 dev, link_ide_stream, false);
         } else {
             pcie_link_ide_config_sel_algo_writable(dev, link_ide_stream, true);
-            pcie_link_ide_config_write_state(
-                dev, link_ide_stream, IDE_STREAM_STATE_INSECURE);
+            pcie_link_ide_transition_to_insecure(dev, link_ide_stream);
         }
     }
 }
@@ -369,8 +392,7 @@ static void pcie_sel_ide_reg_blk_write(
             pcie_sel_ide_config_sel_algo_writable(dev, sel_ide_stream, false);
         } else {
             pcie_sel_ide_config_sel_algo_writable(dev, sel_ide_stream, true);
-            pcie_sel_ide_config_write_state(
-                dev, sel_ide_stream, IDE_STREAM_STATE_INSECURE);
+            pcie_sel_ide_transition_to_insecure(dev, sel_ide_stream);
         }
     }
 
@@ -461,6 +483,9 @@ void pcie_ide_config_write(
 static void pcie_link_ide_stream_init(PCIDevice *dev, LinkIDEStream *stream)
 {
     uint32_t reg = 0;
+    uint8_t key_set_id, sub_stream_id;
+    IDEKeySet *key_set;
+    IDESubStream *sub_stream;
     reg = FIELD_DP32(reg, PCI_LNK_IDE_STREAM_CTRL_REG, EN, true);
     reg = FIELD_DP32(reg, PCI_LNK_IDE_STREAM_CTRL_REG, SEL_ALGO, 0x1f);
     reg = FIELD_DP32(reg, PCI_LNK_IDE_STREAM_CTRL_REG, TC, 0x07);
@@ -472,6 +497,19 @@ static void pcie_link_ide_stream_init(PCIDevice *dev, LinkIDEStream *stream)
         0, PCI_LNK_IDE_STREAM_STATUS_REG, RECV_INT_CHCK_FAIL_MSG, true);
     pci_set_long(
         dev->w1cmask + stream->offset + PCI_EXP_LNK_IDE_STREAM_STATUS, reg);
+
+    for (key_set_id = 0; key_set_id < IDE_KEY_SET_MAX_COUNT; ++key_set_id) {
+        key_set = &stream->stream.key_sets[key_set_id];
+
+        for (sub_stream_id = 0; sub_stream_id < IDE_SUB_STREAM_MAX_COUNT;
+             ++sub_stream_id) {
+            sub_stream = &key_set->sub_streams[sub_stream_id];
+            sub_stream->rx_key = g_byte_array_new();
+            sub_stream->rx_iv = g_byte_array_new();
+            sub_stream->tx_key = g_byte_array_new();
+            sub_stream->tx_iv = g_byte_array_new();
+        }
+    }
 }
 
 static void pcie_ide_addr_assoc_blk_init(PCIDevice *dev, IDEAddrAssocBlock *blk)
@@ -491,8 +529,10 @@ static void pcie_ide_addr_assoc_blk_init(PCIDevice *dev, IDEAddrAssocBlock *blk)
 
 static void pcie_sel_ide_stream_init(PCIDevice *dev, SelectiveIDEStream *stream)
 {
-    uint8_t blk;
     uint32_t reg = 0;
+    uint8_t blk, key_set_id, sub_stream_id;
+    IDEKeySet *key_set;
+    IDESubStream *sub_stream;
     reg = FIELD_DP32(
         reg, PCI_SEL_IDE_STREAM_CAP_REG, NUM_ADDR_ASSOC_REG_BLK,
         stream->ide_addr_assoc_blks_num);
@@ -527,6 +567,19 @@ static void pcie_sel_ide_stream_init(PCIDevice *dev, SelectiveIDEStream *stream)
     for (blk = 0; blk < stream->ide_addr_assoc_blks_num; ++blk) {
         pcie_ide_addr_assoc_blk_init(dev, &stream->ide_addr_assoc_blks[blk]);
     }
+
+    for (key_set_id = 0; key_set_id < IDE_KEY_SET_MAX_COUNT; ++key_set_id) {
+        key_set = &stream->stream.key_sets[key_set_id];
+
+        for (sub_stream_id = 0; sub_stream_id < IDE_SUB_STREAM_MAX_COUNT;
+            ++sub_stream_id) {
+            sub_stream = &key_set->sub_streams[sub_stream_id];
+            sub_stream->rx_key = g_byte_array_new();
+            sub_stream->rx_iv = g_byte_array_new();
+            sub_stream->tx_key = g_byte_array_new();
+            sub_stream->tx_iv = g_byte_array_new();
+        }
+    }
 }
 
 void pcie_ide_init(
@@ -543,18 +596,18 @@ void pcie_ide_init(
     assert(!pci_is_vf(dev));
 
     for (stream = 0; stream < link_ide_streams_num; ++stream) {
-        link_ide_streams[stream].offset = pci_ext_cap_ide_sizeof;
+        link_ide_streams[stream].offset = offset + pci_ext_cap_ide_sizeof;
         pci_ext_cap_ide_sizeof += PCI_EXT_CAP_LNK_IDE_SIZEOF;
     }
 
     for (stream = 0; stream < sel_ide_streams_num; ++stream) {
         sel_ide_stream = &sel_ide_streams[stream];
-        sel_ide_stream->offset = pci_ext_cap_ide_sizeof;
+        sel_ide_stream->offset = offset + pci_ext_cap_ide_sizeof;
         pci_ext_cap_ide_sizeof += PCI_EXT_CAP_SEL_IDE_SIZEOF;
 
         for (blk = 0; blk < sel_ide_stream->ide_addr_assoc_blks_num; ++blk) {
             sel_ide_stream->ide_addr_assoc_blks[blk].offset =
-                pci_ext_cap_ide_sizeof;
+                offset + pci_ext_cap_ide_sizeof;
             pci_ext_cap_ide_sizeof += PCI_EXT_CAP_IDE_ADDR_ASSOC_SIZEOF;
         }
     }
@@ -604,6 +657,56 @@ void pcie_ide_init(
     }
 }
 
+void pcie_ide_fini(PCIDevice *dev)
+{
+    IDEStream *stream;
+    IDEKeySet *key_set;
+    IDESubStream *sub_stream;
+    uint8_t stream_id, key_set_id, sub_stream_id;
+    uint8_t link_ide_streams_num = dev->ide_cap.link_ide_streams_num;
+    uint8_t sel_ide_streams_num = dev->ide_cap.sel_ide_streams_num;
+
+    if (!pcie_ide_present(dev)) {
+        return;
+    }
+
+    for (stream_id = 0; stream_id < link_ide_streams_num; ++stream_id) {
+        stream = &dev->ide_cap.link_ide_streams[stream_id].stream;
+
+        for (key_set_id = 0; key_set_id < IDE_KEY_SET_MAX_COUNT;
+             ++key_set_id) {
+            key_set = &stream->key_sets[key_set_id];
+
+            for (sub_stream_id = 0; sub_stream_id < IDE_KEY_SET_MAX_COUNT;
+                 ++sub_stream_id) {
+                sub_stream = &key_set->sub_streams[sub_stream_id];
+                g_byte_array_unref(sub_stream->rx_key);
+                g_byte_array_unref(sub_stream->rx_iv);
+                g_byte_array_unref(sub_stream->tx_key);
+                g_byte_array_unref(sub_stream->tx_iv);
+            }
+        }
+    }
+
+    for (stream_id = 0; stream_id < sel_ide_streams_num; ++stream_id) {
+        stream = &dev->ide_cap.sel_ide_streams[stream_id].stream;
+
+        for (key_set_id = 0; key_set_id < IDE_KEY_SET_MAX_COUNT;
+             ++key_set_id) {
+            key_set = &stream->key_sets[key_set_id];
+
+            for (sub_stream_id = 0; sub_stream_id < IDE_KEY_SET_MAX_COUNT;
+                 ++sub_stream_id) {
+                sub_stream = &key_set->sub_streams[sub_stream_id];
+                g_byte_array_unref(sub_stream->rx_key);
+                g_byte_array_unref(sub_stream->rx_iv);
+                g_byte_array_unref(sub_stream->tx_key);
+                g_byte_array_unref(sub_stream->tx_iv);
+            }
+        }
+    }
+}
+
 static bool pcie_ide_km_get_response_query(
     PCIDevice *dev, uint32_t session_id, const IDEKMMessage *request,
     size_t request_size, IDEKMMessage *response, size_t *response_size,
@@ -613,9 +716,12 @@ static bool pcie_ide_km_get_response_query(
     IDEKMQueryResp *query_resp;
     size_t size = sizeof(IDEKMQueryResp) + dev->ide_cap.size - PCI_EXP_IDE_CAP;
 
-    assert(response && response_size);
+    assert(response && response_size && error_code);
 
-    if (request_size < sizeof(IDEKMQuery)) {
+    if (!dev->ide_cap.session_bound) {
+        dev->ide_cap.session_id = session_id;
+        dev->ide_cap.session_bound = true;
+    } else if (session_id != dev->ide_cap.session_id) {
         return false;
     }
 
@@ -623,18 +729,17 @@ static bool pcie_ide_km_get_response_query(
         return false;
     }
 
+    if (request_size < sizeof(IDEKMQuery)) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
     query = (IDEKMQuery *)request;
     query_resp = (IDEKMQueryResp *)response;
 
     if (query->port_index != dev->ide_cap.port_index) {
-        return false;
-    }
-
-    if (!dev->ide_cap.session_bound) {
-        dev->ide_cap.session_id = session_id;
-        dev->ide_cap.session_bound = true;
-    } else if (session_id != dev->ide_cap.session_id) {
-        return false;
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
     }
 
     query_resp->common.object_id = PCI_IDE_KM_OBJECT_ID_QUERY_RESP;
@@ -650,6 +755,45 @@ static bool pcie_ide_km_get_response_query(
     return true;
 }
 
+static bool pcie_ide_km_generate_kp_ack(
+    IDEKMKpAck *kp_ack, uint8_t stream_id, IDEKMKpAckStatus status,
+    uint8_t attributes, uint8_t port_index, size_t *response_size)
+{
+    kp_ack->common.object_id = PCI_IDE_KM_OBJECT_ID_KP_ACK;
+    kp_ack->stream_id = stream_id;
+    kp_ack->status = status;
+    kp_ack->attributes = attributes;
+    kp_ack->port_index = port_index;
+    *response_size = sizeof(IDEKMKpAck);
+    return true;
+}
+
+static IDEKMKpAckStatus pcie_ide_key_prog(
+    PCIDevice *dev, IDEStream *stream, uint8_t key_set_id,
+    uint8_t sub_stream_id, uint8_t rxtxb, const uint8_t *key,
+    size_t key_size, const uint8_t *iv, size_t iv_size)
+{
+    IDESubStream *sub_stream =
+        &stream->key_sets[key_set_id].sub_streams[sub_stream_id];
+    GByteArray *key_buffer, *iv_buffer;
+
+    if (rxtxb) {
+        sub_stream->tx_started = false;
+        key_buffer = sub_stream->tx_key;
+        iv_buffer = sub_stream->tx_iv;
+    } else {
+        sub_stream->rx_started = false;
+        key_buffer = sub_stream->rx_key;
+        iv_buffer = sub_stream->rx_iv;
+    }
+
+    g_byte_array_set_size(key_buffer, key_size);
+    g_byte_array_set_size(iv_buffer, iv_size);
+    memcpy(key_buffer->data, key, key_size);
+    memcpy(iv_buffer->data, iv, iv_size);
+    return IDE_KM_KP_ACK_STATUS_SUCCESS;
+}
+
 static bool pcie_ide_km_get_response_key_prog(
     PCIDevice *dev, uint32_t session_id, const IDEKMMessage *request,
     size_t request_size, IDEKMMessage *response, size_t *response_size,
@@ -658,28 +802,12 @@ static bool pcie_ide_km_get_response_key_prog(
     IDEKMKeyProg *key_prog;
     IDEKMKpAck *kp_ack;
     IDEStream *stream;
-    /*
-     * size_t key_size, iv_size;
-     * IDESubStreamID sub_stream;
-     * uint8_t rxtxb, key_set;
-     */
+    uint8_t *key, *iv;
+    size_t key_size, iv_size;
+    uint8_t key_set_id, sub_stream_id, rxtxb;
+    IDEKMKpAckStatus status;
 
-    assert(response && response_size);
-
-    if (request_size < sizeof(IDEKMKeyProg)) {
-        return false;
-    }
-
-    if (*response_size < sizeof(IDEKMKpAck)) {
-        return false;
-    }
-
-    key_prog = (IDEKMKeyProg *)request;
-    kp_ack = (IDEKMKpAck *)response;
-
-    if (key_prog->port_index != dev->ide_cap.port_index) {
-        return false;
-    }
+    assert(response && response_size && error_code);
 
     if (!dev->ide_cap.session_bound) {
         dev->ide_cap.session_id = session_id;
@@ -688,27 +816,75 @@ static bool pcie_ide_km_get_response_key_prog(
         return false;
     }
 
-    stream = pcie_ide_stream_find_by_stream_id(dev, key_prog->stream_id);
-
-    if (!stream) {
+    if (*response_size < sizeof(IDEKMKpAck)) {
         return false;
     }
 
-    /*
-     * sub_stream = ide_km_sub_stream(
-     *     key_prog->attributes, pcie_tee_io_supported(dev));
-     * rxtxb = ide_km_rxtxb(key_prog->attributes);
-     * key_set = ide_km_key_set(key_prog->attributes);
-     * key_size = pcie_ide_km_get_key_size(stream->sel_algo);
-     * iv_size = PCI_IDE_KM_KEY_PROG_IV_SIZE;
-     */
+    if (request_size < sizeof(IDEKMKeyProg)) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
 
-    kp_ack->common.object_id = PCI_IDE_KM_OBJECT_ID_KP_ACK;
-    kp_ack->stream_id = key_prog->stream_id;
-    kp_ack->attributes = key_prog->attributes;
-    kp_ack->port_index = key_prog->port_index;
-    *response_size = sizeof(IDEKMKpAck);
-    return true;
+    key_prog = (IDEKMKeyProg *)request;
+    kp_ack = (IDEKMKpAck *)response;
+
+    if (key_prog->port_index != dev->ide_cap.port_index) {
+        return pcie_ide_km_generate_kp_ack(
+            kp_ack, key_prog->stream_id,
+            IDE_KM_KP_ACK_STATUS_UNSUPPORTED_PORT_INDEX, key_prog->attributes,
+            dev->ide_cap.port_index, response_size);
+    }
+
+    stream = pcie_ide_stream_find_by_stream_id(dev, key_prog->stream_id);
+
+    if (!stream) {
+        return pcie_ide_km_generate_kp_ack(
+            kp_ack, key_prog->stream_id,
+            IDE_KM_KP_ACK_STATUS_UNSUPPORTED_FIELD, key_prog->attributes,
+            dev->ide_cap.port_index, response_size);
+    }
+
+    key_size = pcie_ide_km_get_key_size(stream->sel_algo);
+    iv_size = PCI_IDE_KM_KEY_PROG_IV_SIZE;
+
+    if (request_size < sizeof(IDEKMKeyProg) + key_size + iv_size) {
+        return pcie_ide_km_generate_kp_ack(
+            kp_ack, key_prog->stream_id, IDE_KM_KP_ACK_STATUS_INCORRECT_LENGTH,
+            key_prog->attributes, dev->ide_cap.port_index, response_size);
+    }
+
+    key_set_id = ide_km_key_set(key_prog->attributes);
+    sub_stream_id = ide_km_sub_stream(
+        key_prog->attributes, pcie_tee_io_supported(dev));
+    rxtxb = ide_km_rxtxb(key_prog->attributes);
+
+    if (sub_stream_id >= IDE_SUB_STREAM_MAX_COUNT) {
+        return pcie_ide_km_generate_kp_ack(
+            kp_ack, key_prog->stream_id,
+            IDE_KM_KP_ACK_STATUS_UNSUPPORTED_FIELD, key_prog->attributes,
+            dev->ide_cap.port_index, response_size);
+    }
+
+    assert(key_set_id < IDE_KEY_SET_MAX_COUNT && rxtxb < IDE_RXTXB_MAX_COUNT);
+
+    key = (uint8_t *)key_prog + sizeof(IDEKMKeyProg);
+    /*
+     * According to IDE ECN (Rev 5) the full IV for AES-GCM256 should be 96 bit
+     * with 64 bit provided from the peer (hard coded to 0000_0001h) and the
+     * topmost 32 bit set to 0. However, given that (a) the encryption itself
+     * is not emulated here, (b) we could at best heuristically increment the
+     * IV if at all, and (c) there is no means by which the guest can read out
+     * an IV after it has been programmed, we don't bother expanding the IV and
+     * just keep it around to verify that a given read or write is allowed to
+     * complete.
+     */
+    iv = (uint8_t *)key_prog + sizeof(IDEKMKeyProg) + key_size;
+    status = pcie_ide_key_prog(
+        dev, stream, key_set_id, sub_stream_id, rxtxb, key, key_size, iv,
+        iv_size);
+    return pcie_ide_km_generate_kp_ack(
+        kp_ack, key_prog->stream_id, status, key_prog->attributes,
+        dev->ide_cap.port_index, response_size);
 }
 
 static bool pcie_ide_km_get_response_key_set_go(
@@ -719,10 +895,12 @@ static bool pcie_ide_km_get_response_key_set_go(
     IDEKMKSetGo *k_set_go;
     IDEKMKGostopAck *k_gostop_ack;
     IDEStream *stream;
+    IDESubStream *sub_stream;
+    uint8_t key_set_id, sub_stream_id, rxtxb;
 
-    assert(response && response_size);
+    assert(response && response_size && error_code);
 
-    if (request_size < sizeof(IDEKMKSetGo)) {
+    if (!dev->ide_cap.session_bound || session_id != dev->ide_cap.session_id) {
         return false;
     }
 
@@ -730,21 +908,44 @@ static bool pcie_ide_km_get_response_key_set_go(
         return false;
     }
 
+    if (request_size < sizeof(IDEKMKSetGo)) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
     k_set_go = (IDEKMKSetGo *)request;
     k_gostop_ack = (IDEKMKGostopAck *)response;
 
     if (k_set_go->port_index != dev->ide_cap.port_index) {
-        return false;
-    }
-
-    if (!dev->ide_cap.session_bound || session_id != dev->ide_cap.session_id) {
-        return false;
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
     }
 
     stream = pcie_ide_stream_find_by_stream_id(dev, k_set_go->stream_id);
 
     if (!stream) {
-        return false;
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
+    key_set_id = ide_km_key_set(k_set_go->attributes);
+    sub_stream_id = ide_km_sub_stream(
+        k_set_go->attributes, pcie_tee_io_supported(dev));
+    rxtxb = ide_km_rxtxb(k_set_go->attributes);
+
+    if (sub_stream_id >= IDE_SUB_STREAM_MAX_COUNT) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
+    assert(key_set_id < IDE_KEY_SET_MAX_COUNT && rxtxb < IDE_RXTXB_MAX_COUNT);
+
+    sub_stream = &stream->key_sets[key_set_id].sub_streams[sub_stream_id];
+
+    if (rxtxb) {
+        sub_stream->tx_started = true;
+    } else {
+        sub_stream->rx_started = true;
     }
 
     k_gostop_ack->common.object_id = PCI_IDE_KM_OBJECT_ID_K_GOSTOP_ACK;
@@ -763,10 +964,12 @@ static bool pcie_ide_km_get_response_key_set_stop(
     IDEKMKSetStop *k_set_stop;
     IDEKMKGostopAck *k_gostop_ack;
     IDEStream *stream;
+    IDESubStream *sub_stream;
+    uint8_t key_set_id, sub_stream_id, rxtxb;
 
     assert(response && response_size);
 
-    if (request_size < sizeof(IDEKMKSetStop)) {
+    if (!dev->ide_cap.session_bound || session_id != dev->ide_cap.session_id) {
         return false;
     }
 
@@ -774,21 +977,44 @@ static bool pcie_ide_km_get_response_key_set_stop(
         return false;
     }
 
+    if (request_size < sizeof(IDEKMKSetStop)) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
     k_set_stop = (IDEKMKSetStop *)request;
     k_gostop_ack = (IDEKMKGostopAck *)response;
 
     if (k_set_stop->port_index != dev->ide_cap.port_index) {
-        return false;
-    }
-
-    if (!dev->ide_cap.session_bound || session_id != dev->ide_cap.session_id) {
-        return false;
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
     }
 
     stream = pcie_ide_stream_find_by_stream_id(dev, k_set_stop->stream_id);
 
     if (!stream) {
-        return false;
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
+    key_set_id = ide_km_key_set(k_set_stop->attributes);
+    sub_stream_id = ide_km_sub_stream(
+        k_set_stop->attributes, pcie_tee_io_supported(dev));
+    rxtxb = ide_km_rxtxb(k_set_stop->attributes);
+
+    if (sub_stream_id >= IDE_SUB_STREAM_MAX_COUNT) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
+    assert(key_set_id < IDE_KEY_SET_MAX_COUNT && rxtxb < IDE_RXTXB_MAX_COUNT);
+
+    sub_stream = &stream->key_sets[key_set_id].sub_streams[sub_stream_id];
+
+    if (rxtxb) {
+        sub_stream->tx_started = false;
+    } else {
+        sub_stream->rx_started = false;
     }
 
     k_gostop_ack->common.object_id = PCI_IDE_KM_OBJECT_ID_K_GOSTOP_ACK;
@@ -811,16 +1037,18 @@ bool pcie_ide_km_get_response(
         response_size && request->protocol_id == PCI_SPDM_PROTOCOL_ID_IDE_KM &&
         error_code);
 
-    if (request_size < sizeof(IDEKMMessage)) {
-        return false;
-    }
-
     if (*response_size < sizeof(IDEKMMessage)) {
         return false;
     }
 
+    if (request_size < sizeof(IDEKMMessage)) {
+        *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
+        return true;
+    }
+
     request_message = (IDEKMMessage *)request;
     response_message = (IDEKMMessage *)response;
+    response_message->payload.protocol_id = PCI_SPDM_PROTOCOL_ID_IDE_KM;
 
     switch (request_message->object_id) {
     case PCI_IDE_KM_OBJECT_ID_QUERY:
@@ -849,6 +1077,5 @@ bool pcie_ide_km_get_response(
         break;
     }
 
-    response_message->payload.protocol_id = PCI_SPDM_PROTOCOL_ID_IDE_KM;
     return success;
 }

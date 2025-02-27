@@ -90,17 +90,16 @@ static bool tdisp_testdev_get_response(
     SPDMPCIDefined *request_header, *response_header;
     PCIPayload *request_payload, *response_payload;
     size_t request_payload_size, response_payload_size;
-    SPDMErrorCode error_code;
+    SPDMErrorCode error_code = 0;
     bool success;
 
     assert(session_id && response && response_size);
+    assert(*response_size >= sizeof(SPDMPCIDefined) + sizeof(PCIPayload));
 
     if (request_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
-        return false;
-    }
-
-    if (*response_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
-        return false;
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+            response_size, response);
     }
 
     request_header = (SPDMPCIDefined *)request;
@@ -109,22 +108,26 @@ static bool tdisp_testdev_get_response(
     if (request_header->vendor_defined.header.request_response_code !=
         SPDM_REQUEST_CODE_VENDOR_DEFINED_REQUEST)
     {
-        return false;
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, SPDM_ERROR_CODE_UNSUPPORTED_REQUEST,
+            request_header->vendor_defined.header.request_response_code,
+            response_size, response);
     }
 
     if (request_header->vendor_defined.standard_id !=
-        SPDM_STANDARD_ID_PCISIG) {
-        return false;
-    }
-
-    if (request_header->vendor_defined.len !=
-        sizeof(request_header->vendor_id) ||
+        SPDM_STANDARD_ID_PCISIG ||
+        request_header->vendor_defined.len !=
+            sizeof(request_header->vendor_id) ||
         request_header->vendor_id != SPDM_VENDOR_ID_PCISIG) {
-        return false;
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+            response_size, response);
     }
 
     if (request_size < sizeof(SPDMPCIDefined) + request_header->req_length) {
-        return false;
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+            response_size, response);
     }
 
     request_payload = (PCIPayload *)
@@ -141,15 +144,32 @@ static bool tdisp_testdev_get_response(
             response_payload, &response_payload_size, &error_code);
         break;
     case PCI_SPDM_PROTOCOL_ID_TDISP:
-        success = false;
-        break;
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
+            response_size, response);
     default:
-        success = false;
-        break;
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
+            response_size, response);
     };
 
-    if (UINT16_MAX < response_payload_size) {
+    if (!success) {
         return false;
+    }
+
+    /* Error code 0 is currently reserved and not a valid error code. */
+    if (error_code) {
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, error_code, 0, response_size, response);
+    }
+
+    if (UINT16_MAX < response_payload_size) {
+        error_report(
+            "SPDM vendor defined response payload size exceeds maximum "
+            "representable response length (size=%lu)", response_payload_size);
+        return spdm_responder_get_response_error(
+            tdisp->spdm_responder, error_code,
+            SPDM_ERROR_CODE_OPERATION_FAILED, response_size, response);
     }
 
     response_header->vendor_defined.header.spdm_version =
@@ -160,7 +180,7 @@ static bool tdisp_testdev_get_response(
     response_header->vendor_defined.len = sizeof(response_header->vendor_id);
     response_header->vendor_id = SPDM_VENDOR_ID_PCISIG;
     response_header->req_length = response_payload_size;
-    return success;
+    return true;
 }
 
 static bool tdisp_testdev_handle_request(DOECap *cap)
@@ -169,11 +189,21 @@ static bool tdisp_testdev_handle_request(DOECap *cap)
     Error *local_error;
 
     if (!spdm_responder_dispatch_message(d->spdm_responder, &local_error)) {
+        /*
+         * In case PCIe DOE is used for SPDM message transport, returning false
+         * triggers a DOE Error. In this case, we freeze
+         */
         error_report_err(local_error);
         return false;
     }
 
     return true;
+}
+
+static void tdisp_testdev_exit(PCIDevice *pdev)
+{
+    pcie_doe_fini(&pdev->doe_spdm);
+    pcie_ide_fini(pdev);
 }
 
 static DOEProtocol doe_protocols[] = {
@@ -212,13 +242,8 @@ static void tdisp_testdev_realize(PCIDevice *pdev, Error **errp)
     if (!device_spdm_responder_init(DEVICE(d), d->spdm_responder,
             tdisp_testdev_send_message, tdsip_testdev_receive_message,
             tdisp_testdev_get_response, errp)) {
-        return;
+        tdisp_testdev_exit(pdev);
     }
-}
-
-static void tdisp_testdev_exit(PCIDevice *pdev)
-{
-    pcie_doe_fini(&pdev->doe_spdm);
 }
 
 static const Property tdisp_testdev_properties[] = {

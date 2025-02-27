@@ -11,6 +11,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/spdm/spdm-responder.h"
@@ -123,17 +124,16 @@ static bool gen_rp_get_response(DeviceState *dev, const uint32_t *session_id,
     SPDMPCIDefined *request_header, *response_header;
     PCIPayload *request_payload, *response_payload;
     size_t request_payload_size, response_payload_size;
-    SPDMErrorCode error_code;
+    SPDMErrorCode error_code = 0;
     bool success;
 
     assert(session_id && response && response_size);
+    assert(*response_size >= sizeof(SPDMPCIDefined) + sizeof(PCIPayload));
 
     if (request_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
-        return false;
-    }
-
-    if (*response_size < sizeof(SPDMPCIDefined) + sizeof(PCIPayload)) {
-        return false;
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+            response_size, response);
     }
 
     request_header = (SPDMPCIDefined *)request;
@@ -142,22 +142,26 @@ static bool gen_rp_get_response(DeviceState *dev, const uint32_t *session_id,
     if (request_header->vendor_defined.header.request_response_code !=
         SPDM_REQUEST_CODE_VENDOR_DEFINED_REQUEST)
     {
-        return false;
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, SPDM_ERROR_CODE_UNSUPPORTED_REQUEST,
+            request_header->vendor_defined.header.request_response_code,
+            response_size, response);
     }
 
     if (request_header->vendor_defined.standard_id !=
-        SPDM_STANDARD_ID_PCISIG) {
-        return false;
-    }
-
-    if (request_header->vendor_defined.len !=
-        sizeof(request_header->vendor_id) ||
+        SPDM_STANDARD_ID_PCISIG ||
+        request_header->vendor_defined.len !=
+            sizeof(request_header->vendor_id) ||
         request_header->vendor_id != SPDM_VENDOR_ID_PCISIG) {
-        return false;
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+            response_size, response);
     }
 
     if (request_size < sizeof(SPDMPCIDefined) + request_header->req_length) {
-        return false;
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, SPDM_ERROR_CODE_INVALID_REQUEST, 0,
+            response_size, response);
     }
 
     request_payload = (PCIPayload *)
@@ -174,15 +178,32 @@ static bool gen_rp_get_response(DeviceState *dev, const uint32_t *session_id,
             response_payload, &response_payload_size, &error_code);
         break;
     case PCI_SPDM_PROTOCOL_ID_TDISP:
-        success = false;
-        break;
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
+            response_size, response);
     default:
-        success = false;
-        break;
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
+            response_size, response);
     };
 
-    if (UINT16_MAX < response_payload_size) {
+    if (!success) {
         return false;
+    }
+
+    /* Error code 0 is currently reserved and not a valid error code. */
+    if (error_code) {
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, error_code, 0, response_size, response);
+    }
+
+    if (UINT16_MAX < response_payload_size) {
+        error_report(
+            "SPDM vendor defined response payload size exceeds maximum "
+            "representable response length (size=%lu)", response_payload_size);
+        return spdm_responder_get_response_error(
+            grp->spdm_responder, error_code,
+            SPDM_ERROR_CODE_OPERATION_FAILED, response_size, response);
     }
 
     response_header->vendor_defined.header.spdm_version =
@@ -193,7 +214,7 @@ static bool gen_rp_get_response(DeviceState *dev, const uint32_t *session_id,
     response_header->vendor_defined.len = sizeof(response_header->vendor_id);
     response_header->vendor_id = SPDM_VENDOR_ID_PCISIG;
     response_header->req_length = response_payload_size;
-    return success;
+    return true;
 }
 
 static bool gen_rp_handle_request(DOECap *cap)
@@ -209,10 +230,23 @@ static bool gen_rp_handle_request(DOECap *cap)
     return true;
 }
 
+static void gen_rp_exit(PCIDevice *pdev)
+{
+    PCIERootPortClass *rpc = PCIE_ROOT_PORT_GET_CLASS(pdev);
+
+    pcie_doe_fini(&pdev->doe_spdm);
+    pcie_ide_fini(pdev);
+    rpc->parent_exit(pdev);
+}
+
 static DOEProtocol doe_protocols[] = {
     { PCI_VENDOR_ID_PCI_SIG, PCI_SIG_DOE_CMA, gen_rp_handle_request },
     { PCI_VENDOR_ID_PCI_SIG, PCI_SIG_DOE_SECURED_CMA, gen_rp_handle_request },
     { },
+};
+
+static SelectiveIDEStream sel_ide_streams[] = {
+    { .ide_addr_assoc_blks_num = 0 },
 };
 
 static void gen_rp_realize(DeviceState *dev, Error **errp)
@@ -241,7 +275,7 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
                                               grp->res_reserve, errp);
 
     if (rc < 0) {
-        rpc->parent_class.exit(d);
+        gen_rp_exit(d);
         return;
     }
 
@@ -260,7 +294,7 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
                                         gen_rp_send_message,
                                         gen_rp_receive_message,
                                         gen_rp_get_response, errp)) {
-            rpc->parent_class.exit(d);
+            gen_rp_exit(d);
             return;
         }
 
@@ -269,7 +303,7 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
 
     if (d->cap_present & QEMU_PCIE_CAP_IDE) {
         pcie_ide_init(d, GEN_PCIE_ROOT_PORT_IDE_OFFSET, ide_km_supported, NULL,
-                      0, NULL, 0);
+                      0, sel_ide_streams, ARRAY_SIZE(sel_ide_streams));
     }
 }
 
@@ -319,10 +353,13 @@ static void gen_rp_dev_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     PCIERootPortClass *rpc = PCIE_ROOT_PORT_CLASS(klass);
 
+    rpc->parent_exit = k->exit;
+
     k->config_write = gen_rp_config_write;
     k->config_read = gen_rp_config_read;
     k->vendor_id = PCI_VENDOR_ID_REDHAT;
     k->device_id = PCI_DEVICE_ID_REDHAT_PCIE_RP;
+    k->exit = gen_rp_exit;
     dc->desc = "PCI Express Root Port";
     dc->vmsd = &vmstate_rp_dev;
     device_class_set_props(dc, gen_rp_props);

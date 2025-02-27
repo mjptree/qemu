@@ -482,11 +482,17 @@ static libspdm_return_t spdm_responder_libspdm_get_response(
 
         assert(responder->get_response);
 
-        if (!responder->get_response(responder->dev, session_id, request_size,
-                                     request, response_size, response)) {
-            return libspdm_generate_error_response(
-                spdm_context, SPDM_ERROR_CODE_OPERATION_FAILED, 0,
-                response_size, response);
+        if (!responder->get_response(
+            responder->dev, session_id, request_size, request, response_size,
+            response)) {
+            /*
+             * Signal to libspdm to drop the response by both setting the size
+             * of the response to zero and returning status unsupported cap.
+             * If DOE is used as transport, this will set the DOE Error bit in
+             * the DOE Status register.
+             */
+            *response_size = 0;
+            return LIBSPDM_STATUS_UNSUPPORTED_CAP;
         }
     } else {
         return LIBSPDM_STATUS_UNSUPPORTED_CAP;
@@ -921,6 +927,17 @@ static uint8_t spdm_responder_libspdm_get_connection_version(
     return version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
 }
 
+static bool spdm_responder_libspdm_get_response_error(
+    SPDMResponder *obj, uint8_t error_code, uint8_t error_data,
+    size_t *response_size, SPDMHeader *response)
+{
+    SPDMResponderLibspdm *responder = SPDM_RESPONDER_LIBSPDM(obj);
+    libspdm_return_t status = libspdm_generate_error_response(
+        responder->spdm_context, error_code, error_data, response_size,
+        response);
+    return LIBSPDM_STATUS_IS_SUCCESS(status);
+}
+
 OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(
     SPDMResponderLibspdm, spdm_responder_libspdm, SPDM_RESPONDER_LIBSPDM,
     SPDM_RESPONDER, { TYPE_USER_CREATABLE }, { })
@@ -1224,6 +1241,7 @@ static void spdm_responder_libspdm_class_init(ObjectClass *klass, void *data)
     src->dispatch_message = spdm_responder_libspdm_dispatch_message;
     src->get_connection_version =
         spdm_responder_libspdm_get_connection_version;
+    src->get_response_error = spdm_responder_libspdm_get_response_error;
 
     property = object_class_property_add(klass, DATA_TRANSFER_SIZE_PROP,
         "uint32", spdm_responder_libspdm_get_data_transfer_size,
