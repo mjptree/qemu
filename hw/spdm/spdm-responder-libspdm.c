@@ -365,6 +365,7 @@ static libspdm_return_t spdm_responder_libspdm_acquire_sender_buffer(
 {
     SPDMResponderLibspdm *responder =
         spdm_responder_libspdm_get_from_context(spdm_context);
+    memset(responder->receiver_buffer, 0, responder->buffer_size);
     *msg_buf_ptr = responder->sender_buffer;
     return LIBSPDM_STATUS_SUCCESS;
 }
@@ -374,6 +375,7 @@ static libspdm_return_t spdm_responder_libspdm_acquire_receiver_buffer(
 {
     SPDMResponderLibspdm *responder =
         spdm_responder_libspdm_get_from_context(spdm_context);
+    memset(responder->receiver_buffer, 0, responder->buffer_size);
     *msg_buf_ptr = responder->receiver_buffer;
     return LIBSPDM_STATUS_SUCCESS;
 }

@@ -5,6 +5,7 @@
 #include "hw/pci/pcie.h"
 #include "hw/pci/pcie_doe.h"
 #include "hw/pci/pcie_ide.h"
+#include "hw/pci/pcie_tdisp.h"
 
 #define TYPE_PCI_DEVICE "pci-device"
 typedef struct PCIDeviceClass PCIDeviceClass;
@@ -170,6 +171,9 @@ struct PCIDevice {
 
     /* IDE */
     IDECap ide_cap;
+
+    /* TDISP */
+    TDISPDevice tdisp_dsm;
 
     /* ID of standby device in net_failover pair */
     char *failover_pair_id;

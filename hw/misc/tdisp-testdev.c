@@ -3,6 +3,8 @@
 #include "qemu/units.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pcie_doe.h"
+#include "hw/pci/pcie_ide.h"
+#include "hw/pci/pcie_tdisp.h"
 #include "hw/qdev-properties.h"
 #include "hw/spdm/spdm-responder.h"
 #include "qom/object.h"
@@ -144,9 +146,10 @@ static bool tdisp_testdev_get_response(
             response_payload, &response_payload_size, &error_code);
         break;
     case PCI_SPDM_PROTOCOL_ID_TDISP:
-        return spdm_responder_get_response_error(
-            tdisp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
-            response_size, response);
+        success = pcie_tdisp_get_response(
+            pdev, *session_id, request_payload, request_payload_size,
+            response_payload, &response_payload_size, &error_code);
+        break;
     default:
         return spdm_responder_get_response_error(
             tdisp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
@@ -224,8 +227,8 @@ static void tdisp_testdev_realize(PCIDevice *pdev, Error **errp)
 
     if (!d->spdm_responder) {
         error_setg(errp, "tdisp-testdev requires a valid spdm-responder");
-        error_append_hint(errp, "create an spdm-responder with `-object "
-                          "spdm-responder-libspdm,...");
+        error_append_hint(errp, "Create an spdm-responder with `-object "
+                          "spdm-responder-libspdm");
         return;
     }
 
@@ -238,6 +241,7 @@ static void tdisp_testdev_realize(PCIDevice *pdev, Error **errp)
     pcie_ide_init(
         pdev, PCI_CONFIG_SPACE_SIZE + PCI_DOE_SIZEOF, true, NULL, 0,
         sel_ide_streams, ARRAY_SIZE(sel_ide_streams));
+    pcie_tdisp_init(pdev, false);
 
     if (!device_spdm_responder_init(DEVICE(d), d->spdm_responder,
             tdisp_testdev_send_message, tdsip_testdev_receive_message,

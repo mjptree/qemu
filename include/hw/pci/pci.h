@@ -230,7 +230,7 @@ enum {
 #define QEMU_PCIE_IDE_BITNR 15
     QEMU_PCIE_CAP_IDE = (1 << QEMU_PCIE_IDE_BITNR),
 #define QEMU_PCIE_TDISP_BITNR 16
-    QEMU_PCIE_CAP_TDISP = (1 << QEMU_PCIE_TDISP_BITNR)
+    QEMU_PCIE_CAP_TDISP = (1 << QEMU_PCIE_TDISP_BITNR),
 };
 
 typedef struct PCIINTxRoute {
@@ -368,6 +368,7 @@ void pci_for_each_device_under_bus_reverse(PCIBus *bus,
 void pci_for_each_bus_depth_first(PCIBus *bus, pci_bus_ret_fn begin,
                                   pci_bus_fn end, void *parent_state);
 PCIDevice *pci_get_function_0(PCIDevice *pci_dev);
+uint16_t pci_get_id(PCIDevice *pci_dev);
 
 /* Use this wrapper when specific scan order is not required. */
 static inline

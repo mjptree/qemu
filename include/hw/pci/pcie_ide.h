@@ -41,6 +41,7 @@ REG32(PCI_IDE_CAP_REG, PCI_EXP_IDE_CAP)
     FIELD(PCI_IDE_CAP_REG, SUPP_ALGO, 8, 5)
     FIELD(PCI_IDE_CAP_REG, NUM_LNK_IDE_STREAMS_SUPP, 13, 3)
     FIELD(PCI_IDE_CAP_REG, NUM_SEL_IDE_STREAMS_SUPP, 16, 8)
+    FIELD(PCI_IDE_CAP_REG, TEE_LTD_STREAM_SUPP, 24, 1)
 
 /* IDE Control Register */
 #define PCI_EXP_IDE_CTRL    0x08
@@ -82,6 +83,7 @@ REG32(PCI_SEL_IDE_STREAM_CTRL_REG, PCI_EXP_SEL_IDE_STREAM_CTRL)
     FIELD(PCI_SEL_IDE_STREAM_CTRL_REG, SEL_ALGO, 14, 5)
     FIELD(PCI_SEL_IDE_STREAM_CTRL_REG, TC, 19, 3)
     FIELD(PCI_SEL_IDE_STREAM_CTRL_REG, DEFAULT_STREAM, 22, 1)
+    FIELD(PCI_SEL_IDE_STREAM_CTRL_REG, TEE_LTD_STREAM, 23, 1)
     FIELD(PCI_SEL_IDE_STREAM_CTRL_REG, STREAM_ID, 24, 8)
 
 /* Selective IDE Stream Status Register */
@@ -196,7 +198,13 @@ typedef struct IDECap {
     SelectiveIDEStream *default_stream;
 } IDECap;
 
+bool pcie_sel_ide_enabled(PCIDevice *dev, SelectiveIDEStream *stream);
+void pcie_sel_ide_config_tee_limited_stream_writable(
+    PCIDevice *dev, SelectiveIDEStream *stream, bool writable);
+uint8_t pcie_sel_ide_stream_id(PCIDevice *dev, SelectiveIDEStream *stream);
+
 bool pcie_ide_present(PCIDevice *dev);
+bool pcie_ide_km_supported(PCIDevice *dev);
 void pcie_link_ide_transition_to_insecure(
     PCIDevice *dev, LinkIDEStream *stream);
 void pcie_sel_ide_transition_to_insecure(

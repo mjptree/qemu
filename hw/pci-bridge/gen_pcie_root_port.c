@@ -18,6 +18,7 @@
 #include "hw/pci/msix.h"
 #include "hw/pci/pcie_doe.h"
 #include "hw/pci/pcie_ide.h"
+#include "hw/pci/pcie_tdisp.h"
 #include "hw/pci/pcie_port.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
@@ -173,14 +174,27 @@ static bool gen_rp_get_response(DeviceState *dev, const uint32_t *session_id,
 
     switch (request_payload->protocol_id) {
     case PCI_SPDM_PROTOCOL_ID_IDE_KM:
+        if (!pcie_ide_km_supported(pdev)) {
+            return spdm_responder_get_response_error(
+                grp->spdm_responder, error_code,
+                SPDM_ERROR_CODE_INVALID_REQUEST, response_size, response);
+        }
+
         success = pcie_ide_km_get_response(
             pdev, *session_id, request_payload, request_payload_size,
             response_payload, &response_payload_size, &error_code);
         break;
     case PCI_SPDM_PROTOCOL_ID_TDISP:
-        return spdm_responder_get_response_error(
-            grp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
-            response_size, response);
+        if (!pcie_tee_io_supported(pdev)) {
+            return spdm_responder_get_response_error(
+                grp->spdm_responder, error_code,
+                SPDM_ERROR_CODE_INVALID_REQUEST, response_size, response);
+        }
+
+        success = pcie_tdisp_get_response(
+            pdev, *session_id, request_payload, request_payload_size,
+            response_payload, &response_payload_size, &error_code);
+        break;
     default:
         return spdm_responder_get_response_error(
             grp->spdm_responder, error_code, SPDM_ERROR_CODE_INVALID_REQUEST,
@@ -258,6 +272,14 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
     PCIERootPortClass *rpc = PCIE_ROOT_PORT_GET_CLASS(d);
     bool ide_km_supported = false;
 
+    if (d->cap_present & QEMU_PCIE_CAP_TDISP &&
+        !(d->cap_present & QEMU_PCIE_CAP_IDE)) {
+        error_setg(errp, "TEE-I/O requires the IDE extended capability");
+        error_append_hint(errp,
+                          "Try appending -device x-pcie-idecap-init=on`\n");
+        return;
+    }
+
     rpc->parent_realize(dev, errp);
     if (*errp) {
         return;
@@ -305,6 +327,10 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
         pcie_ide_init(d, GEN_PCIE_ROOT_PORT_IDE_OFFSET, ide_km_supported, NULL,
                       0, sel_ide_streams, ARRAY_SIZE(sel_ide_streams));
     }
+
+    if (d->cap_present & QEMU_PCIE_CAP_TDISP) {
+        pcie_tdisp_init(d, false);
+    }
 }
 
 static const VMStateDescription vmstate_rp_dev = {
@@ -343,6 +369,8 @@ static const Property gen_rp_props[] = {
                                 width, PCIE_LINK_WIDTH_32),
     DEFINE_PROP_BIT("x-pcie-idecap-init", PCIDevice, cap_present,
                     QEMU_PCIE_IDE_BITNR, false),
+    DEFINE_PROP_BIT("x-pcie-tee-io-init", PCIDevice, cap_present,
+                    QEMU_PCIE_TDISP_BITNR, false),
     DEFINE_PROP_LINK("x-spdm-responder", GenPCIERootPort, spdm_responder,
                      TYPE_SPDM_RESPONDER, SPDMResponder *),
 };

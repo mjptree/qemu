@@ -103,7 +103,7 @@ static LinkIDEStream *pcie_link_ide_find_by_stream_id(
     return NULL;
 }
 
-static bool pcie_sel_ide_enabled(PCIDevice *dev, SelectiveIDEStream *stream)
+bool pcie_sel_ide_enabled(PCIDevice *dev, SelectiveIDEStream *stream)
 {
     uint8_t *stream_ctrl =
         dev->config + stream->offset + PCI_EXP_SEL_IDE_STREAM_CTRL;
@@ -179,8 +179,19 @@ static void pcie_sel_ide_config_write_default_stream(
     pci_set_long(stream_ctrl, reg);
 }
 
-static uint8_t pcie_sel_ide_stream_id(
-    PCIDevice *dev, SelectiveIDEStream *stream)
+void pcie_sel_ide_config_tee_limited_stream_writable(
+    PCIDevice *dev, SelectiveIDEStream *stream, bool writable)
+{
+    uint8_t *stream_ctrl =
+        dev->wmask + stream->offset + PCI_EXP_SEL_IDE_STREAM_CTRL;
+    uint32_t reg;
+    reg = pci_get_long(stream_ctrl);
+    reg = FIELD_DP32(
+        reg, PCI_SEL_IDE_STREAM_CTRL_REG, TEE_LTD_STREAM, writable);
+    pci_set_long(stream_ctrl, reg);
+}
+
+uint8_t pcie_sel_ide_stream_id(PCIDevice *dev, SelectiveIDEStream *stream)
 {
     uint8_t *stream_ctrl =
         dev->config + stream->offset + PCI_EXP_SEL_IDE_STREAM_CTRL;
@@ -227,6 +238,18 @@ static SelectiveIDEStream *pcie_sel_ide_find_by_stream_id(
 bool pcie_ide_present(PCIDevice *dev)
 {
     return dev->ide_cap.offset;
+}
+
+bool pcie_ide_km_supported(PCIDevice *dev)
+{
+    uint32_t reg;
+
+    if (!pcie_ide_present(dev)) {
+        return false;
+    }
+
+    reg = pci_get_long(dev->config + dev->ide_cap.offset + PCI_EXP_IDE_CAP);
+    return FIELD_EX32(reg, PCI_IDE_CAP_REG, IDE_KM_SUPP);
 }
 
 void pcie_link_ide_transition_to_insecure(
@@ -299,6 +322,13 @@ static bool pcie_ide_is_tc_supported(PCIDevice *dev, uint8_t tc)
     uint8_t *ide_cap = dev->config + dev->ide_cap.offset + PCI_EXP_IDE_CAP;
     uint32_t reg = pci_get_long(ide_cap);
     return FIELD_EX32(reg, PCI_IDE_CAP_REG, NUM_LNK_IDE_STREAMS_SUPP) >= tc;
+}
+
+static bool pcie_ide_is_tee_limited_stream_supported(PCIDevice *dev)
+{
+    uint8_t *ide_cap = dev->config + dev->ide_cap.offset + PCI_EXP_IDE_CAP;
+    uint32_t reg = pci_get_long(ide_cap);
+    return FIELD_EX32(reg, PCI_IDE_CAP_REG, TEE_LTD_STREAM_SUPP);
 }
 
 static size_t pcie_ide_km_get_key_size(IDESelAlgo sel_algo)
@@ -394,6 +424,14 @@ static void pcie_sel_ide_reg_blk_write(
             pcie_sel_ide_config_sel_algo_writable(dev, sel_ide_stream, true);
             pcie_sel_ide_transition_to_insecure(dev, sel_ide_stream);
         }
+
+        /* TDISP ECN */
+        if (pcie_tee_io_supported(dev) &&
+            pcie_ide_is_tee_limited_stream_supported(dev)) {
+            pcie_sel_ide_config_tee_limited_stream_writable(
+                dev, sel_ide_stream,
+                !pcie_sel_ide_enabled(dev, sel_ide_stream));
+        }
     }
 
     if (range_covers_byte(
@@ -474,7 +512,7 @@ void pcie_ide_config_write(
         pcie_link_ide_reg_blk_write(dev, link_ide_stream, addr, size, val);
     }
 
-    for (stream = 0; stream < dev->ide_cap.link_ide_streams_num; ++stream) {
+    for (stream = 0; stream < dev->ide_cap.sel_ide_streams_num; ++stream) {
         sel_ide_stream = &dev->ide_cap.sel_ide_streams[stream];
         pcie_sel_ide_reg_blk_write(dev, sel_ide_stream, addr, size, val);
     }
@@ -853,10 +891,10 @@ static bool pcie_ide_km_get_response_key_prog(
             key_prog->attributes, dev->ide_cap.port_index, response_size);
     }
 
-    key_set_id = ide_km_key_set(key_prog->attributes);
-    sub_stream_id = ide_km_sub_stream(
+    key_set_id = IDE_KM_KEY_SET(key_prog->attributes);
+    sub_stream_id = IDE_KM_SUB_STREAM(
         key_prog->attributes, pcie_tee_io_supported(dev));
-    rxtxb = ide_km_rxtxb(key_prog->attributes);
+    rxtxb = IDE_KM_RXTXB(key_prog->attributes);
 
     if (sub_stream_id >= IDE_SUB_STREAM_MAX_COUNT) {
         return pcie_ide_km_generate_kp_ack(
@@ -928,10 +966,10 @@ static bool pcie_ide_km_get_response_key_set_go(
         return true;
     }
 
-    key_set_id = ide_km_key_set(k_set_go->attributes);
-    sub_stream_id = ide_km_sub_stream(
+    key_set_id = IDE_KM_KEY_SET(k_set_go->attributes);
+    sub_stream_id = IDE_KM_SUB_STREAM(
         k_set_go->attributes, pcie_tee_io_supported(dev));
-    rxtxb = ide_km_rxtxb(k_set_go->attributes);
+    rxtxb = IDE_KM_RXTXB(k_set_go->attributes);
 
     if (sub_stream_id >= IDE_SUB_STREAM_MAX_COUNT) {
         *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;
@@ -997,10 +1035,10 @@ static bool pcie_ide_km_get_response_key_set_stop(
         return true;
     }
 
-    key_set_id = ide_km_key_set(k_set_stop->attributes);
-    sub_stream_id = ide_km_sub_stream(
+    key_set_id = IDE_KM_KEY_SET(k_set_stop->attributes);
+    sub_stream_id = IDE_KM_SUB_STREAM(
         k_set_stop->attributes, pcie_tee_io_supported(dev));
-    rxtxb = ide_km_rxtxb(k_set_stop->attributes);
+    rxtxb = IDE_KM_RXTXB(k_set_stop->attributes);
 
     if (sub_stream_id >= IDE_SUB_STREAM_MAX_COUNT) {
         *error_code = SPDM_ERROR_CODE_INVALID_REQUEST;

@@ -103,17 +103,18 @@ typedef struct IDEKMQueryResp {
 /* Size of AES-GCM256 Key */
 #define PCI_IDE_KM_AES_GCM256_KEY_SIZE  32
 
-#define ide_km_key_set(attr)    extract8(attr, 0, 1)
-#define ide_km_rxtxb(attr)      extract8(attr, 1, 1)
+#define IDE_KM_KEY_SET(attr)    extract8(attr, 0, 1)
+#define IDE_KM_RXTXB(attr)      extract8(attr, 1, 1)
 /*
  * In IDE ECN Rev A (PCIe Base Rev 5) the sub stream field can be 4 bit long.
  * This has been limited to 3 bits in TDISP ECN (PCIe Base Rev 5.0/6.0).
  */
-#define ide_km_sub_stream(attr, tee_io_supported) \
-    extract8(attr, 4, tee_io_supported ? 3 : 4)
+#define IDE_KM_SUB_STREAM(attr, tee_io_supported) \
+    extract8(attr, 4, (tee_io_supported) ? 3 : 4)
 
-#define ide_km_attributes(key_set, rxtxb, sub_stream) \
-    ((0x01 & key_set) | ((0x01 & rxtxb) << 1) | ((0x0f & sub_stream) << 4))
+#define IDE_KM_ATTRIBUTES(key_set, rxtxb, sub_stream) \
+    ((0x01 & (key_set)) | ((0x01 & (rxtxb)) << 1) | \
+    ((0x0f & (sub_stream)) << 4))
 
 typedef struct IDEKMKeyProg {
     IDEKMMessage common;
@@ -162,11 +163,11 @@ typedef struct IDEKMKGostopAck {
 
 /* PCI-SIG defined TDISP Request Codes */
 #define PCI_TDISP_REQUEST_CODE_GET_TDISP_VERSION            0x81
-#define PCI_TDISP_REQUEST_CODE_GET_TDISP_CAPABILITES        0x82
+#define PCI_TDISP_REQUEST_CODE_GET_TDISP_CAPABILITIES       0x82
 #define PCI_TDISP_REQUEST_CODE_LOCK_INTERFACE_REQUEST       0x83
 #define PCI_TDISP_REQUEST_CODE_GET_DEVICE_INTERFACE_REPORT  0x84
 #define PCI_TDISP_REQUEST_CODE_GET_DEVICE_INTERFACE_STATE   0x85
-#define PCI_TDSIP_REQUEST_CODE_START_INTERFACE_REQUEST      0x86
+#define PCI_TDISP_REQUEST_CODE_START_INTERFACE_REQUEST      0x86
 #define PCI_TDISP_REQUEST_CODE_STOP_INTERFACE_REQUEST       0x87
 #define PCI_TDISP_REQUEST_CODE_BIND_P2P_STREAM_REQUEST      0x88
 #define PCI_TDISP_REQUEST_CODE_UNBIND_P2P_STREAM_REQUEST    0x89
@@ -185,7 +186,18 @@ typedef struct IDEKMKGostopAck {
 #define PCI_TDISP_RESPONSE_CODE_UNBIND_P2P_STREAM_RESPONSE  0x09
 #define PCI_TDISP_RESPONSE_CODE_SET_MMIO_ATTRIBUTE_RESPONSE 0x0a
 #define PCI_TDISP_RESPONSE_CODE_VDM_RESPONSE                0x0b
-#define PCI_TDISP_RESPONSE_TDISP_ERROR                      0x7f
+#define PCI_TDISP_RESPONSE_CODE_TDISP_ERROR                 0x7f
+
+#define TDISP_VERSION(major, minor) ((0x0f & (major)) << 4 | (0x0f & (minor)))
+#define TDISP_FUNCTION_ID_RID(function_id) \
+    extract32(function_id, 0, 16)
+#define TDISP_FUNCTION_ID_SEGMENT(function_id) \
+    extract32(function_id, 16, 8)
+#define TDISP_FUNCTION_ID_SEGMENT_VALID(function_id) \
+    extract32(function_id, 24, 1)
+#define TDISP_FUNCTION_ID(rid, segment, segment_valid) \
+    ((0x0001 & (segment_valid)) << 24 | (0x00ff & (segment)) << 16 | \
+     (0xffff & (rid)))
 
 typedef struct TDISPInterfaceID {
     uint32_t function_id;
@@ -209,10 +221,19 @@ typedef struct TDISPVersion {
     uint8_t version_num_count;
 } TDISPTDISPVersion;
 
-typedef struct TDISPGetTDSIPCapabilities {
+typedef struct TDISPGetTDISPCapabilities {
     TDISPMessage common;
     uint32_t tsm_caps;
-} TDISPGetTDSIPCapabilities;
+} TDISPGetTDISPCapabilities;
+
+#define TDISP_REQ_MSG_SUPPORTED(req_code) \
+    ((PCI_TDISP_REQUEST_CODE_ ## req_code) - 0x80)
+
+#define TDISP_LOCK_INTERFACE_FLAG_NO_FW_UPDATE     0x01
+#define TDISP_LOCK_INTERFACE_FLAG_SYSTEM_CLS       0x02
+#define TDISP_LOCK_INTERFACE_FLAG_LOCK_MSIX        0x04
+#define TDISP_LOCK_INTERFACE_FLAG_BIND_P2P         0x08
+#define TDISP_LOCK_INTERFACE_FLAG_ALL_REQ_REDIRECT 0x10
 
 typedef struct TDISPCapabilities {
     TDISPMessage common;

@@ -225,7 +225,7 @@ static libspdm_return_t tdisp_testdev_send_message(
         return LIBSPDM_STATUS_SEND_FAIL;
     }
 
-    for (size_t index; index < message_size / sizeof(uint32_t); ++index) {
+    for (size_t index = 0; index < message_size / sizeof(uint32_t); ++index) {
         qpcie_config_writel(
             &responder->pci, responder->doe_offset + PCI_EXP_DOE_WR_DATA_MBOX,
             data[index]);
@@ -772,7 +772,7 @@ static void tdisp_testdev_ide_km_key_prog(
     key_prog->header.object_id = PCI_IDE_KM_OBJECT_ID_KEY_PROG;
     key_prog->stream_id = stream_id;
     key_prog->key_sub_stream =
-        ide_km_attributes(key_set_id, rxtxb, sub_stream_id);
+        IDE_KM_ATTRIBUTES(key_set_id, rxtxb, sub_stream_id);
     key_prog->port_index = port_index;
     /* Sending effectively an all zero key and IV */
 
@@ -855,7 +855,7 @@ static void tdisp_testdev_ide_km_k_set_go(
     k_set_go->header.object_id = PCI_IDE_KM_OBJECT_ID_K_SET_GO;
     k_set_go->stream_id = stream_id;
     k_set_go->key_sub_stream =
-        ide_km_attributes(key_set, rxtxb, sub_stream);
+        IDE_KM_ATTRIBUTES(key_set, rxtxb, sub_stream);
     k_set_go->port_index = port_index;
 
     response = g_malloc0(response_size);
@@ -937,7 +937,7 @@ static void tdisp_testdev_ide_km_k_set_stop(
     k_set_stop->header.object_id = PCI_IDE_KM_OBJECT_ID_K_SET_STOP;
     k_set_stop->stream_id = stream_id;
     k_set_stop->key_sub_stream =
-        ide_km_attributes(key_set, rxtxb, sub_stream);
+        IDE_KM_ATTRIBUTES(key_set, rxtxb, sub_stream);
     k_set_stop->port_index = port_index;
 
     response = g_malloc0(response_size);
@@ -1152,6 +1152,707 @@ static void tdisp_testdev_ide_km(void *obj, void *data, QGuestAllocator *alloc)
     tdisp_testdev_spdm_fini_session(&tdisp->device);
 }
 
+static void tdisp_testdev_tdisp_get_tdisp_version(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_tdisp_get_version_request_t *get_tdisp_version;
+    pci_tdisp_version_response_t *tdisp_version;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_tdisp_get_version_request_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_get_version_request_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_TDISP;
+
+    get_tdisp_version = (pci_tdisp_get_version_request_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    get_tdisp_version->header.version = TDISP_VERSION(1, 0);
+    get_tdisp_version->header.message_type =
+        PCI_TDISP_REQUEST_CODE_GET_TDISP_VERSION;
+    get_tdisp_version->header.interface_id.function_id =
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false);
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, >=,
+        sizeof(pci_protocol_header_t) + sizeof(pci_tdisp_version_response_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_TDISP);
+
+    tdisp_version = (pci_tdisp_version_response_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        tdisp_version->header.version, ==, TDISP_VERSION(1, 0));
+    g_assert_cmpuint(
+        tdisp_version->header.message_type, ==,
+        PCI_TDISP_RESPONSE_CODE_TDISP_VERSION);
+    g_assert_cmpuint(
+        tdisp_version->header.interface_id.function_id, ==,
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false));
+    g_assert_cmpuint(tdisp_version->version_num_count, ==, 1);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, ==,
+        sizeof(pci_protocol_header_t) + sizeof(pci_tdisp_version_response_t) +
+        tdisp_version->version_num_count);
+
+    g_free(request);
+    g_free(response);
+}
+
+static void tdisp_testdev_tdisp_get_tdisp_capabilities(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_tdisp_get_capabilities_request_t *get_tdisp_capabilities;
+    pci_tdisp_capabilities_response_t *tdisp_capabilities;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_tdisp_get_capabilities_request_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_get_capabilities_request_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_TDISP;
+
+    get_tdisp_capabilities = (pci_tdisp_get_capabilities_request_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    get_tdisp_capabilities->header.version = TDISP_VERSION(1, 0);
+    get_tdisp_capabilities->header.message_type =
+        PCI_TDISP_REQUEST_CODE_GET_TDISP_CAPABILITIES;
+    get_tdisp_capabilities->header.interface_id.function_id =
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false);
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, ==,
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_capabilities_response_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_TDISP);
+
+    tdisp_capabilities = (pci_tdisp_capabilities_response_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        tdisp_capabilities->header.version, ==, TDISP_VERSION(1, 0));
+    g_assert_cmpuint(
+        tdisp_capabilities->header.message_type, ==,
+        PCI_TDISP_RESPONSE_CODE_TDISP_CAPABILITIES);
+    g_assert_cmpuint(
+        tdisp_capabilities->header.interface_id.function_id, ==,
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(GET_TDISP_VERSION));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(GET_TDISP_CAPABILITIES));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(LOCK_INTERFACE_REQUEST));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(GET_DEVICE_INTERFACE_REPORT));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(GET_DEVICE_INTERFACE_STATE));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(START_INTERFACE_REQUEST));
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.req_msg_supported[0], &,
+        TDISP_REQ_MSG_SUPPORTED(STOP_INTERFACE_REQUEST));
+    g_assert_cmpuint(tdisp_capabilities->rsp_caps.req_msg_supported[1], ==, 0);
+    g_assert_cmpuint(tdisp_capabilities->rsp_caps.req_msg_supported[2], ==, 0);
+    g_assert_cmpuint(tdisp_capabilities->rsp_caps.req_msg_supported[3], ==, 0);
+    g_assert_cmpuint(
+        tdisp_capabilities->rsp_caps.dev_addr_width, ==, sizeof(void *) * 8);
+    g_assert_cmpuint(tdisp_capabilities->rsp_caps.num_req_this, ==, 1);
+    g_assert_cmpuint(tdisp_capabilities->rsp_caps.num_req_all, ==, 1);
+
+    g_free(request);
+    g_free(response);
+}
+
+static void tdisp_testdev_tdisp_get_device_interface_state(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn,
+    uint8_t state)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_tdisp_get_device_interface_state_request_t *get_device_interface_state;
+    pci_tdisp_device_interface_state_response_t *device_interface_state;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_tdisp_get_device_interface_state_request_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_get_device_interface_state_request_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_TDISP;
+
+    get_device_interface_state =
+        (pci_tdisp_get_device_interface_state_request_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    get_device_interface_state->header.version = TDISP_VERSION(1, 0);
+    get_device_interface_state->header.message_type =
+        PCI_TDISP_REQUEST_CODE_GET_DEVICE_INTERFACE_STATE;
+    get_device_interface_state->header.interface_id.function_id =
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false);
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, ==,
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_device_interface_state_response_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_TDISP);
+
+    device_interface_state = (pci_tdisp_device_interface_state_response_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        device_interface_state->header.version, ==, TDISP_VERSION(1, 0));
+    g_assert_cmpuint(
+        device_interface_state->header.message_type, ==,
+        PCI_TDISP_RESPONSE_CODE_DEVICE_INTERFACE_STATE);
+    g_assert_cmpuint(
+        device_interface_state->header.interface_id.function_id, ==,
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false));
+    g_assert_cmpuint(device_interface_state->tdi_state, ==, state);
+}
+
+static void tdisp_testdev_tdisp_lock_interface_request(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn,
+    uint8_t stream_id, uint8_t *start_interface_nonce)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_tdisp_lock_interface_request_t *lock_interface_request;
+    pci_tdisp_lock_interface_response_t *lock_interface_response;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_tdisp_lock_interface_request_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_lock_interface_request_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_TDISP;
+
+    lock_interface_request = (pci_tdisp_lock_interface_request_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    lock_interface_request->header.version = TDISP_VERSION(1, 0);
+    lock_interface_request->header.message_type =
+        PCI_TDISP_REQUEST_CODE_LOCK_INTERFACE_REQUEST;
+    lock_interface_request->header.interface_id.function_id =
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false);
+    lock_interface_request->lock_interface_param.default_stream_id = stream_id;
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, ==,
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_lock_interface_response_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_TDISP);
+
+    lock_interface_response = (pci_tdisp_lock_interface_response_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        lock_interface_response->header.version, ==, TDISP_VERSION(1, 0));
+    g_assert_cmpuint(
+        lock_interface_response->header.message_type, ==,
+        PCI_TDISP_RESPONSE_CODE_LOCK_INTERFACE_RESPONSE);
+    g_assert_cmpuint(
+        lock_interface_response->header.interface_id.function_id, ==,
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false));
+    memcpy(
+        start_interface_nonce, lock_interface_response->start_interface_nonce,
+        sizeof(lock_interface_response->start_interface_nonce));
+
+    g_free(request);
+    g_free(response);
+}
+
+static void tdisp_testdev_tdisp_start_interface_request(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn,
+    uint8_t *start_interface_nonce)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_tdisp_start_interface_request_t *start_interface_request;
+    pci_tdisp_start_interface_response_t *start_interface_response;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_tdisp_start_interface_request_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_start_interface_request_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_TDISP;
+
+    start_interface_request = (pci_tdisp_start_interface_request_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    start_interface_request->header.version = TDISP_VERSION(1, 0);
+    start_interface_request->header.message_type =
+        PCI_TDISP_REQUEST_CODE_START_INTERFACE_REQUEST;
+    start_interface_request->header.interface_id.function_id =
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false);
+    memcpy(
+        start_interface_request->start_interface_nonce, start_interface_nonce,
+        sizeof(start_interface_request->start_interface_nonce));
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, ==,
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_start_interface_response_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_TDISP);
+
+    start_interface_response = (pci_tdisp_start_interface_response_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        start_interface_response->header.version, ==, TDISP_VERSION(1, 0));
+    g_assert_cmpuint(
+        start_interface_response->header.message_type, ==,
+        PCI_TDISP_RESPONSE_CODE_START_INTERFACE_RESPONSE);
+    g_assert_cmpuint(
+        start_interface_response->header.interface_id.function_id, ==,
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false));
+
+    g_free(request);
+    g_free(response);
+}
+
+static void tdisp_testdev_tdisp_stop_interface_request(
+    void *spdm_context, uint32_t session_id, uint8_t busnr, uint8_t devfn)
+{
+    pci_doe_spdm_vendor_defined_request_t *request;
+    pci_doe_spdm_vendor_defined_response_t *response;
+    pci_tdisp_stop_interface_request_t *stop_interface_request;
+    pci_tdisp_stop_interface_response_t *stop_interface_response;
+    size_t request_size = sizeof(pci_doe_spdm_vendor_defined_request_t) +
+        sizeof(pci_tdisp_stop_interface_request_t);
+    size_t response_size = SPDM_MAX_VENDOR_DEFINED_DATA_LEN;
+
+    libspdm_data_parameter_t paramter;
+    spdm_version_number_t version;
+    size_t version_size = sizeof(version);
+    paramter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    assert_libspdm_is_success(
+        libspdm_get_data(
+            spdm_context, LIBSPDM_DATA_SPDM_VERSION, &paramter, &version,
+            &version_size));
+
+    request = g_malloc0(request_size);
+    request->spdm_header.spdm_version =
+        version >> SPDM_VERSION_NUMBER_SHIFT_BIT;
+    request->spdm_header.request_response_code = SPDM_VENDOR_DEFINED_REQUEST;
+    request->pci_doe_vendor_header.standard_id = SPDM_STANDARD_ID_PCISIG;
+    request->pci_doe_vendor_header.len =
+        sizeof(request->pci_doe_vendor_header.vendor_id);
+    request->pci_doe_vendor_header.vendor_id = SPDM_VENDOR_ID_PCISIG;
+    request->pci_doe_vendor_header.payload_length =
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_stop_interface_request_t);
+    request->pci_doe_vendor_header.pci_protocol.protocol_id =
+        PCI_PROTOCOL_ID_TDISP;
+
+    stop_interface_request = (pci_tdisp_stop_interface_request_t *)
+        ((uint8_t *)request + sizeof(pci_doe_spdm_vendor_defined_request_t));
+    stop_interface_request->header.version = TDISP_VERSION(1, 0);
+    stop_interface_request->header.message_type =
+        PCI_TDISP_REQUEST_CODE_STOP_INTERFACE_REQUEST;
+    stop_interface_request->header.interface_id.function_id =
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false);
+
+    response = g_malloc0(response_size);
+
+    assert_libspdm_is_success(
+        libspdm_send_receive_data(
+            spdm_context, &session_id, false, request, request_size, response,
+            &response_size));
+
+    g_assert_cmpuint(
+        response->spdm_header.spdm_version, ==,
+        request->spdm_header.spdm_version);
+    g_assert_cmpuint(
+        response->spdm_header.request_response_code, ==,
+        SPDM_VENDOR_DEFINED_RESPONSE);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.standard_id, ==,
+        SPDM_STANDARD_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.len, ==, sizeof(uint16_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.vendor_id, ==, SPDM_VENDOR_ID_PCISIG);
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.payload_length, ==,
+        sizeof(pci_protocol_header_t) +
+        sizeof(pci_tdisp_stop_interface_response_t));
+    g_assert_cmpuint(
+        response->pci_doe_vendor_header.pci_protocol.protocol_id, ==,
+        PCI_PROTOCOL_ID_TDISP);
+
+    stop_interface_response = (pci_tdisp_stop_interface_response_t *)
+        ((uint8_t *)response + sizeof(pci_doe_spdm_vendor_defined_response_t));
+    g_assert_cmpuint(
+        stop_interface_response->header.version, ==, TDISP_VERSION(1, 0));
+    g_assert_cmpuint(
+        stop_interface_response->header.message_type, ==,
+        PCI_TDISP_RESPONSE_CODE_STOP_INTERFACE_RESPONSE);
+    g_assert_cmpuint(
+        stop_interface_response->header.interface_id.function_id, ==,
+        TDISP_FUNCTION_ID(busnr << 8 | devfn, 0, false));
+
+    g_free(request);
+    g_free(response);
+}
+
+static void tdisp_testdev_tdisp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QTDISPTestDev *tdisp = obj;
+    uint32_t reg;
+    uint16_t device_sel_ide_reg_offset, root_port_sel_ide_reg_offset;
+    uint8_t stream_id = 1, sub_stream_id, rxtxb;
+    uint8_t start_interface_nonce[32];
+
+    /* Assign device Selective IDE Stream ID */
+    reg = qpcie_config_readl(
+        &tdisp->device.pci, tdisp->device.ide_offset + PCI_EXP_IDE_CAP);
+    g_assert_false(FIELD_EX32(reg, PCI_IDE_CAP_REG, LNK_IDE_STREAM_SUPP));
+    g_assert_true(FIELD_EX32(reg, PCI_IDE_CAP_REG, SEL_IDE_STREAM_SUPP));
+    g_assert_true(FIELD_EX32(reg, PCI_IDE_CAP_REG, IDE_KM_SUPP));
+
+    reg = 0;
+    reg = FIELD_DP32(reg, PCI_SEL_IDE_STREAM_CTRL_REG, STREAM_ID, stream_id);
+    reg = FIELD_DP32(reg, PCI_SEL_IDE_STREAM_CTRL_REG, DEFAULT_STREAM, true);
+
+    device_sel_ide_reg_offset =
+        tdisp->device.ide_offset + PCI_EXT_CAP_IDE_SIZEOF;
+    qpcie_config_writel(
+        &tdisp->device.pci,
+        device_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL, reg);
+    g_assert_cmpuint(
+        qpcie_config_readl(
+            &tdisp->device.pci,
+            device_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL), ==, reg);
+
+    reg = 0;
+    reg = FIELD_DP32(reg, PCI_SEL_IDE_STREAM_CTRL_REG, STREAM_ID, stream_id);
+
+    root_port_sel_ide_reg_offset =
+        tdisp->root_port.ide_offset + PCI_EXT_CAP_IDE_SIZEOF;
+    qpcie_config_writel(
+        &tdisp->root_port.pci,
+        root_port_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL, reg);
+    g_assert_cmpuint(
+        qpcie_config_readl(
+            &tdisp->root_port.pci,
+            root_port_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL), ==,
+        reg);
+
+    /* Initiate SPDM session */
+    tdisp_testdev_spdm_init_session(&tdisp->device);
+    tdisp_testdev_spdm_init_session(&tdisp->root_port);
+
+    /* Programm IDE keys into ports */
+    for (sub_stream_id = 0; sub_stream_id < IDE_SUB_STREAM_MAX_COUNT;
+         ++sub_stream_id) {
+        for (rxtxb = 0; rxtxb < IDE_RXTXB_MAX_COUNT; ++rxtxb) {
+            tdisp_testdev_ide_km_key_prog(
+                tdisp->device.spdm_context, tdisp->device.session_id, 0,
+                stream_id, 0, sub_stream_id, rxtxb);
+        }
+    }
+
+    for (sub_stream_id = 0; sub_stream_id < IDE_SUB_STREAM_MAX_COUNT;
+         ++sub_stream_id) {
+        for (rxtxb = 0; rxtxb < IDE_RXTXB_MAX_COUNT; ++rxtxb) {
+            tdisp_testdev_ide_km_key_prog(
+                tdisp->root_port.spdm_context, tdisp->root_port.session_id, 0,
+                stream_id, 0, sub_stream_id, rxtxb);
+        }
+    }
+
+    /* Enable IDE key set at both partner ports*/
+    reg = qpcie_config_readl(
+        &tdisp->device.pci,
+        device_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL);
+    reg = FIELD_DP32(reg, PCI_SEL_IDE_STREAM_CTRL_REG, EN, true);
+    qpcie_config_writel(
+        &tdisp->device.pci,
+        device_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL, reg);
+    g_assert_cmpuint(
+        qpcie_config_readl(
+            &tdisp->device.pci,
+            device_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL), ==,
+            reg);
+
+    reg = qpcie_config_readl(
+        &tdisp->root_port.pci,
+        root_port_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL);
+    reg = FIELD_DP32(reg, PCI_SEL_IDE_STREAM_CTRL_REG, EN, true);
+    qpcie_config_writel(
+        &tdisp->root_port.pci,
+        root_port_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL, reg);
+    g_assert_cmpuint(
+        qpcie_config_readl(
+            &tdisp->root_port.pci,
+            root_port_sel_ide_reg_offset + PCI_EXP_SEL_IDE_STREAM_CTRL), ==,
+            reg);
+
+    for (sub_stream_id = 0; sub_stream_id < IDE_SUB_STREAM_MAX_COUNT;
+         ++sub_stream_id) {
+        for (rxtxb = 0; rxtxb < IDE_RXTXB_MAX_COUNT; ++rxtxb) {
+            tdisp_testdev_ide_km_k_set_go(
+                tdisp->device.spdm_context, tdisp->device.session_id, 0,
+                stream_id, 0, sub_stream_id, rxtxb);
+        }
+    }
+
+    for (sub_stream_id = 0; sub_stream_id < IDE_SUB_STREAM_MAX_COUNT;
+         ++sub_stream_id) {
+        for (rxtxb = 0; rxtxb < IDE_RXTXB_MAX_COUNT; ++rxtxb) {
+            tdisp_testdev_ide_km_k_set_go(
+                tdisp->root_port.spdm_context, tdisp->root_port.session_id, 0,
+                stream_id, 0, sub_stream_id, rxtxb);
+        }
+    }
+
+    /* TDISP secured exchange */
+    tdisp_testdev_tdisp_get_tdisp_version(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0));
+    tdisp_testdev_tdisp_get_tdisp_capabilities(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0));
+    tdisp_testdev_tdisp_get_device_interface_state(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0), PCI_TDISP_TDI_STATE_CONFIG_UNLOCKED);
+
+    /* Transition to CONFIG_LOCKED */
+    tdisp_testdev_tdisp_lock_interface_request(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0), stream_id, start_interface_nonce);
+    tdisp_testdev_tdisp_get_device_interface_state(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0), PCI_TDISP_TDI_STATE_CONFIG_LOCKED);
+
+    /* Transition to RUN */
+    tdisp_testdev_tdisp_start_interface_request(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0), start_interface_nonce);
+    tdisp_testdev_tdisp_get_device_interface_state(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0), PCI_TDISP_TDI_STATE_RUN);
+
+    /* Transition to CONFIG_UNLOCKED */
+    tdisp_testdev_tdisp_stop_interface_request(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0));
+    tdisp_testdev_tdisp_get_device_interface_state(
+        tdisp->device.spdm_context, tdisp->device.session_id, 1,
+        QPCI_DEVFN(0, 0), PCI_TDISP_TDI_STATE_CONFIG_UNLOCKED);
+
+    /* Terminate secure session */
+    tdisp_testdev_spdm_fini_session(&tdisp->device);
+}
+
 static void tdisp_testdev_register_driver(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -1164,7 +1865,7 @@ static void tdisp_testdev_register_driver(void)
                 "keys=tests/data/tdisp/ecp256/root-port.key,"
                 "certs=tests/data/tdisp/ecp384/root-port.certchain.der,"
                 "keys=tests/data/tdisp/ecp384/root-port.key "
-            "-device pcie-root-port,addr=04.0,id=pcie.1,"
+            "-device pcie-root-port,addr=04.0,id=pcie.1,x-pcie-tee-io-init=on,"
                 "x-spdm-responder=spdm.0,x-pcie-idecap-init=on "
 
             /* SPDM Responder for TDISP Test Device*/
@@ -1197,6 +1898,7 @@ static void tdisp_testdev_register_tests(void)
     qos_add_test(
         "secure-session", "tdisp-testdev", tdisp_testdev_secure_session, NULL);
     qos_add_test("ide-km", "tdisp-testdev", tdisp_testdev_ide_km, NULL);
+    qos_add_test("tdisp", "tdisp-testdev", tdisp_testdev_tdisp, NULL);
 }
 
 libqos_init(tdisp_testdev_register_driver);

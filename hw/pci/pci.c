@@ -3050,6 +3050,11 @@ PCIDevice *pci_get_function_0(PCIDevice *pci_dev)
     }
 }
 
+uint16_t pci_get_id(PCIDevice *pci_dev)
+{
+    return pci_dev_bus_num(pci_dev) << 8 | pci_dev->devfn;
+}
+
 MSIMessage pci_get_msi_message(PCIDevice *dev, int vector)
 {
     MSIMessage msg;
